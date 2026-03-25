@@ -1,0 +1,75 @@
+# TutorialVault Configuration
+# All paths are relative to this file's directory unless absolute.
+
+# --- Storage ---
+store:
+  # Where LanceDB stores its data. Relative to project root.
+  path: .lancedb
+  # Main table name for chunks
+  table: tutorials
+  # Episode summaries table
+  summaries_table: episode_summaries
+
+# --- Embedding ---
+embedding:
+  # HuggingFace model name
+  model: BAAI/bge-m3
+  # Vector dimension (must match model output)
+  dim: 1024
+  # Device: "cuda" for GPU, "cpu" for CPU-only
+  device: auto  # auto = cuda if available, else cpu
+  # Batch size for encoding
+  batch_size: 32
+
+# --- Chunking ---
+chunking:
+  # Target chunk duration in seconds
+  target_sec: 90
+  # Overlap with previous chunk in seconds
+  overlap_sec: 15
+
+# --- Search ---
+search:
+  # Cross-encoder reranker model (set to null to disable)
+  reranker_model: BAAI/bge-reranker-v2-m3
+  # Max reranker input length
+  reranker_max_length: 512
+  # Parent window expansion: seconds before/after matched chunk
+  parent_window_sec: 150
+  # Number of candidates to pull before reranking
+  candidate_count: 30
+  # RRF constant (higher = less weight on top ranks)
+  rrf_k: 60
+
+# --- Transcription ---
+transcription:
+  # Whisper model size: tiny, base, small, medium, large-v2, large-v3
+  model: large-v2
+  # Device for whisper
+  device: cuda
+  # Compute type: float16, int8, int8_float16
+  compute_type: float16
+  # Language (null = auto-detect)
+  language: en
+
+# --- Provider (LLM inference) ---
+provider:
+  # Active provider: claude_code, opencode, codex, kilo, local_gguf, custom
+  active: kilo
+  # Default model per provider (override in provider-specific config)
+  claude_code:
+    model: sonnet
+  opencode:
+    model: opencode/minimax-m2.5-free
+  codex:
+    model: o4-mini
+  kilo:
+    model: kilo-auto/free
+  local_gguf:
+    model_path: null  # path to .gguf file
+    n_gpu_layers: -1  # -1 = all layers on GPU
+    n_ctx: 8192
+  custom:
+    base_url: null
+    api_key: null
+    model: null

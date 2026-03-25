@@ -1,0 +1,42 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Data / Models (large files, don't commit)
+.lancedb/
+*.onnx
+*.onnx_data
+*.gguf
+*.bin
+*.safetensors
+*.pt
+*.pth
+
+# HuggingFace cache
+.cache/
+
+# Config overrides (may contain API keys)
+config.local.yaml
+
+# Eval outputs
+eval_results/
