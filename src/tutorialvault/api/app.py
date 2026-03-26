@@ -10,7 +10,7 @@ Run with: python -m tutorialvault.server
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routes import chat, collections, health, providers, search
+from .routes import chat, collections, health, providers, search, sessions
 
 
 def create_app() -> FastAPI:
@@ -50,5 +50,6 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(providers.router)
     app.include_router(collections.router)
+    app.include_router(sessions.router)
 
     return app

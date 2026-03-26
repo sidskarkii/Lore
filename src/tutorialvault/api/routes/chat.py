@@ -12,8 +12,39 @@ import time
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from ..schemas import ChatRequest, ChatResponse, ChatMessage, SearchResult
+from ...core.database import get_database
 from ...core.search import SearchEngine
 from ...providers.registry import get_registry
+
+
+def _get_or_create_session(req: ChatRequest, provider_name: str, model: str | None) -> str:
+    """Resume existing session or create a new one. Returns session_id."""
+    db = get_database()
+    if req.session_id:
+        session = db.get_session(req.session_id)
+        if session:
+            return req.session_id
+    # Create new session — title from first user message
+    title = "New Chat"
+    for m in req.messages:
+        if m.role == "user":
+            title = m.content[:80]
+            break
+    session = db.create_session(title=title, provider=provider_name, model=model)
+    return session["id"]
+
+
+def _sources_for_db(sources: list[dict]) -> list[dict]:
+    """Slim down sources for SQLite storage (no full text, just refs)."""
+    return [
+        {
+            "collection_display": s.get("collection_display", ""),
+            "episode_title": s.get("episode_title", ""),
+            "timestamp": s.get("timestamp", "00:00"),
+            "url": s.get("url", ""),
+        }
+        for s in sources
+    ]
 
 router = APIRouter(tags=["chat"])
 
@@ -110,24 +141,33 @@ def chat(req: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Provider error: {e}")
 
+    # Persist to SQLite
+    db = get_database()
+    session_id = _get_or_create_session(req, provider.name, req.model)
+    db.add_message(session_id, "user", last_user_msg)
+    db.add_message(session_id, "assistant", answer, sources=_sources_for_db(sources))
+
+    source_results = [
+        SearchResult(
+            text=s.get("text", "")[:500],
+            collection=s.get("collection", ""),
+            collection_display=s.get("collection_display", ""),
+            episode_num=s.get("episode_num", 0),
+            episode_title=s.get("episode_title", ""),
+            timestamp=s.get("timestamp", "00:00"),
+            start_sec=s.get("start_sec", 0),
+            end_sec=s.get("end_sec", 0),
+            url=s.get("url", ""),
+            topic=s.get("topic", ""),
+            subtopic=s.get("subtopic", ""),
+        )
+        for s in sources
+    ]
+
     return ChatResponse(
+        session_id=session_id,
         answer=answer,
-        sources=[
-            SearchResult(
-                text=s.get("text", "")[:500],
-                collection=s.get("collection", ""),
-                collection_display=s.get("collection_display", ""),
-                episode_num=s.get("episode_num", 0),
-                episode_title=s.get("episode_title", ""),
-                timestamp=s.get("timestamp", "00:00"),
-                start_sec=s.get("start_sec", 0),
-                end_sec=s.get("end_sec", 0),
-                url=s.get("url", ""),
-                topic=s.get("topic", ""),
-                subtopic=s.get("subtopic", ""),
-            )
-            for s in sources
-        ],
+        sources=source_results,
         provider=provider.name,
         model=req.model or "default",
     )
@@ -184,12 +224,24 @@ async def chat_stream(ws: WebSocket):
                 },
             }))
 
+        # Persist user message + create/resume session
+        db = get_database()
+        session_id = _get_or_create_session(req, provider.name, req.model)
+        db.add_message(session_id, "user", last_user_msg)
+
+        await ws.send_text(json.dumps({"type": "session", "data": session_id}))
+
         # Stream LLM response
         rag_messages = _build_rag_messages(req.messages, sources)
+        full_response = ""
         for chunk in provider.stream(rag_messages, model=req.model):
+            full_response += chunk
             await ws.send_text(json.dumps({"type": "token", "data": chunk}))
 
-        await ws.send_text(json.dumps({"type": "done", "data": None}))
+        # Persist assistant response
+        db.add_message(session_id, "assistant", full_response, sources=_sources_for_db(sources))
+
+        await ws.send_text(json.dumps({"type": "done", "data": session_id}))
 
     except WebSocketDisconnect:
         pass

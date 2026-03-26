@@ -52,6 +52,7 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     """Send a message and get an LLM response grounded in search results."""
+    session_id: str | None = Field(None, description="Session ID to continue (creates new if null)")
     messages: list[ChatMessage] = Field(..., description="Conversation history")
     n_sources: int = Field(5, ge=1, le=10, description="Number of sources to retrieve")
     topic: str | None = Field(None, description="Filter search by topic")
@@ -62,6 +63,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     """Non-streaming chat response."""
+    session_id: str = Field(..., description="Session ID (new or continued)")
     answer: str = Field(..., description="The LLM's response")
     sources: list[SearchResult] = Field(default_factory=list, description="Retrieved sources")
     provider: str = Field(..., description="Which provider generated the answer")
@@ -160,6 +162,57 @@ class CollectionsResponse(BaseModel):
 class DeleteCollectionRequest(BaseModel):
     """Delete a collection."""
     collection: str = Field(..., description="Collection ID to delete")
+
+
+# ── Sessions ──────────────────────────────────────────────────────────────
+
+class MessageInfo(BaseModel):
+    """A message in a chat session."""
+    id: str
+    role: str
+    content: str
+    sources: list[dict] = Field(default_factory=list)
+    created_at: str
+    session_id: str | None = None
+    session_title: str | None = None
+
+
+class SessionInfo(BaseModel):
+    """Summary of a chat session (for list views)."""
+    id: str
+    title: str
+    created_at: str
+    updated_at: str
+    provider: str | None = None
+    model: str | None = None
+    message_count: int = 0
+
+
+class SessionDetail(SessionInfo):
+    """Full session with all messages."""
+    messages: list[MessageInfo] = Field(default_factory=list)
+
+
+class SessionsResponse(BaseModel):
+    """List of sessions."""
+    sessions: list[SessionInfo]
+
+
+class RenameSessionRequest(BaseModel):
+    """Rename a session."""
+    title: str = Field(..., description="New title")
+
+
+class SearchMessagesRequest(BaseModel):
+    """Search across all message history."""
+    query: str = Field(..., description="Search query")
+    limit: int = Field(20, ge=1, le=100)
+
+
+class SearchMessagesResponse(BaseModel):
+    """Search results from message history."""
+    query: str
+    results: list[MessageInfo]
 
 
 # ── Health ────────────────────────────────────────────────────────────────
