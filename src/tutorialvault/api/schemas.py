@@ -1,0 +1,174 @@
+"""API schemas — Pydantic models for all request/response payloads.
+
+These define the contract between the frontend and backend. Every API
+endpoint uses these for validation and serialization. The frontend
+TypeScript types should mirror these exactly.
+"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+# ── Search ────────────────────────────────────────────────────────────────
+
+class SearchRequest(BaseModel):
+    """Search the knowledge base."""
+    query: str = Field(..., description="Natural language search query")
+    n_results: int = Field(5, ge=1, le=20, description="Number of results to return")
+    topic: str | None = Field(None, description="Filter by topic (e.g. '3d', 'ai', 'code')")
+    subtopic: str | None = Field(None, description="Filter by subtopic (e.g. 'blender', 'houdini')")
+
+
+class SearchResult(BaseModel):
+    """A single search result with source metadata."""
+    text: str = Field(..., description="The chunk text (may be parent-expanded)")
+    collection: str = Field(..., description="Collection ID")
+    collection_display: str = Field(..., description="Human-readable collection name")
+    episode_num: int = Field(..., description="Episode number within collection")
+    episode_title: str = Field(..., description="Episode title")
+    timestamp: str = Field(..., description="Start timestamp as MM:SS")
+    start_sec: int = Field(..., description="Start time in seconds")
+    end_sec: int = Field(..., description="End time in seconds")
+    url: str = Field("", description="Source URL (video link, doc page)")
+    topic: str = Field("")
+    subtopic: str = Field("")
+
+
+class SearchResponse(BaseModel):
+    """Search results."""
+    results: list[SearchResult]
+    query: str
+    total: int
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    """A single message in a conversation."""
+    role: str = Field(..., description="'system', 'user', or 'assistant'")
+    content: str = Field(..., description="Message text")
+
+
+class ChatRequest(BaseModel):
+    """Send a message and get an LLM response grounded in search results."""
+    messages: list[ChatMessage] = Field(..., description="Conversation history")
+    n_sources: int = Field(5, ge=1, le=10, description="Number of sources to retrieve")
+    topic: str | None = Field(None, description="Filter search by topic")
+    subtopic: str | None = Field(None, description="Filter search by subtopic")
+    model: str | None = Field(None, description="Override the active provider's model")
+    provider: str | None = Field(None, description="Override the active provider")
+
+
+class ChatResponse(BaseModel):
+    """Non-streaming chat response."""
+    answer: str = Field(..., description="The LLM's response")
+    sources: list[SearchResult] = Field(default_factory=list, description="Retrieved sources")
+    provider: str = Field(..., description="Which provider generated the answer")
+    model: str = Field(..., description="Which model was used")
+
+
+# ── Providers ─────────────────────────────────────────────────────────────
+
+class ProviderModelInfo(BaseModel):
+    """A model available through a provider."""
+    id: str
+    name: str
+    free: bool = False
+    context_window: int = 0
+
+
+class ProviderInfo(BaseModel):
+    """Status of a single provider."""
+    name: str = Field(..., description="Provider ID (e.g. 'kilo', 'claude_code')")
+    display_name: str = Field(..., description="Human-readable name")
+    installed: bool = False
+    authenticated: bool = False
+    version: str | None = None
+    user: str | None = None
+    error: str | None = None
+    models: list[ProviderModelInfo] = Field(default_factory=list)
+    free_model_count: int = 0
+    install_command: str | None = None
+    is_active: bool = False
+
+
+class ProvidersResponse(BaseModel):
+    """Status of all providers."""
+    providers: list[ProviderInfo]
+    active: str | None = Field(None, description="Currently active provider name")
+
+
+class SetActiveRequest(BaseModel):
+    """Switch the active provider."""
+    provider: str = Field(..., description="Provider name to activate")
+    model: str | None = Field(None, description="Default model for this provider")
+
+
+class InstallRequest(BaseModel):
+    """Request to install a provider's CLI."""
+    provider: str = Field(..., description="Provider name to install")
+
+
+class InstallResponse(BaseModel):
+    """Result of an install attempt."""
+    success: bool
+    provider: str
+    error: str | None = None
+
+
+class TestConnectionRequest(BaseModel):
+    """Test a provider's connection."""
+    provider: str | None = Field(None, description="Provider to test (uses active if null)")
+    model: str | None = Field(None, description="Model to test with")
+
+
+class TestConnectionResponse(BaseModel):
+    """Result of a connection test."""
+    success: bool
+    provider: str
+    model: str
+    latency_ms: float = 0
+    response_preview: str = ""
+    error: str | None = None
+
+
+# ── Collections ───────────────────────────────────────────────────────────
+
+class EpisodeInfo(BaseModel):
+    """An episode within a collection."""
+    episode_num: int
+    episode_title: str
+
+
+class CollectionInfo(BaseModel):
+    """A collection of indexed content."""
+    collection: str = Field(..., description="Collection ID")
+    collection_display: str = Field(..., description="Human-readable name")
+    topic: str
+    subtopic: str
+    episode_count: int
+    episodes: list[EpisodeInfo]
+
+
+class CollectionsResponse(BaseModel):
+    """All indexed collections."""
+    collections: list[CollectionInfo]
+    total_chunks: int
+
+
+class DeleteCollectionRequest(BaseModel):
+    """Delete a collection."""
+    collection: str = Field(..., description="Collection ID to delete")
+
+
+# ── Health ────────────────────────────────────────────────────────────────
+
+class HealthResponse(BaseModel):
+    """Server health check."""
+    status: str = "ok"
+    version: str = ""
+    embedding_model: str = ""
+    reranker_model: str = ""
+    total_chunks: int = 0
+    active_provider: str | None = None
