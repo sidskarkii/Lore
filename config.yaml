@@ -12,10 +12,12 @@ store:
 
 # --- Embedding ---
 embedding:
-  # HuggingFace model name
-  model: BAAI/bge-m3
-  # Vector dimension (must match model output)
-  dim: 1024
+  # HuggingFace ONNX model repo
+  model: onnx-community/embeddinggemma-300m-ONNX
+  # Quantization variant: fp32 (1.2GB), q8 (295MB), q4 (188MB), q4f16 (168MB)
+  variant: q4
+  # Vector dimension (768 for EmbeddingGemma, 1024 for BGE-M3)
+  dim: 768
   # Device: "cuda" for GPU, "cpu" for CPU-only
   device: auto  # auto = cuda if available, else cpu
   # Batch size for encoding
@@ -30,10 +32,11 @@ chunking:
 
 # --- Search ---
 search:
-  # Cross-encoder reranker model (set to null to disable)
-  reranker_model: BAAI/bge-reranker-v2-m3
-  # Max reranker input length
-  reranker_max_length: 512
+  # FlashRank reranker model (set to null to disable)
+  # Options: ms-marco-MiniLM-L-12-v2 (34MB, best quality)
+  #          ms-marco-TinyBERT-L-2-v2 (4MB, fastest)
+  #          ms-marco-MultiBERT-L-12 (150MB, multilingual)
+  reranker_model: ms-marco-MiniLM-L-12-v2
   # Parent window expansion: seconds before/after matched chunk
   parent_window_sec: 150
   # Number of candidates to pull before reranking

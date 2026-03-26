@@ -1,4 +1,4 @@
-"""Search — hybrid retrieval with RRF fusion, reranking, and parent expansion."""
+"""Search — hybrid retrieval with RRF fusion, FlashRank reranking, and parent expansion."""
 
 from __future__ import annotations
 
@@ -7,79 +7,40 @@ from .config import get_config
 from .embed import embed_texts
 from .store import Store
 
-_reranker_session = None
-_reranker_tokenizer = None
+_ranker = None
 
 
-def _get_reranker():
-    """Lazy-load cross-encoder reranker via ONNX."""
-    global _reranker_session, _reranker_tokenizer
-    if _reranker_session is not None:
-        return _reranker_session, _reranker_tokenizer
+def _get_ranker():
+    """Lazy-load FlashRank reranker."""
+    global _ranker
+    if _ranker is not None:
+        return _ranker
 
     cfg = get_config()
-    model_name = cfg.get("search.reranker_model")
-    if model_name is None:
-        return None, None
+    model = cfg.get("search.reranker_model")
+    if not model:
+        return None
 
-    import onnxruntime as ort
-    from huggingface_hub import snapshot_download
-    from tokenizers import Tokenizer
-    from pathlib import Path
-
-    print(f"  Loading reranker {model_name} (ONNX)...")
-    model_path = Path(snapshot_download(
-        model_name,
-        allow_patterns=["onnx/*", "tokenizer*", "special_tokens_map.json", "vocab.txt", "sentencepiece*"],
-    ))
-
-    onnx_dir = model_path / "onnx"
-    onnx_file = onnx_dir / "model.onnx"
-    if not onnx_file.exists():
-        onnx_files = list(onnx_dir.glob("*.onnx"))
-        onnx_file = onnx_files[0] if onnx_files else None
-    if onnx_file is None:
-        print(f"  Reranker ONNX not found for {model_name}, skipping reranking")
-        return None, None
-
-    device = cfg.embed_device
-    providers = (["CUDAExecutionProvider", "CPUExecutionProvider"]
-                 if device == "cuda" else ["CPUExecutionProvider"])
-    sess_opts = ort.SessionOptions()
-    sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    _reranker_session = ort.InferenceSession(str(onnx_file), sess_opts, providers=providers)
-
-    max_len = cfg.get("search.reranker_max_length", 512)
-    tok_file = model_path / "tokenizer.json"
-    _reranker_tokenizer = Tokenizer.from_file(str(tok_file))
-    _reranker_tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
-    _reranker_tokenizer.enable_truncation(max_length=max_len)
-
-    return _reranker_session, _reranker_tokenizer
+    from flashrank import Ranker
+    print(f"  Loading reranker {model}...")
+    _ranker = Ranker(model_name=model)
+    return _ranker
 
 
-def _rerank_scores(query: str, texts: list[str]) -> list[float]:
-    """Score query-text pairs with the cross-encoder reranker."""
-    import numpy as np
+def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
+    """Rerank candidates using FlashRank. Returns top n."""
+    ranker = _get_ranker()
+    if ranker is None:
+        return candidates[:n]
 
-    session, tokenizer = _get_reranker()
-    if session is None:
-        return [0.0] * len(texts)
+    from flashrank import RerankRequest
 
-    # Cross-encoders take paired input: (query, text)
-    encoded = tokenizer.encode_batch([(query, t) for t in texts])
-    input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-    attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-
-    feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
-    input_names = [inp.name for inp in session.get_inputs()]
-    if "token_type_ids" in input_names:
-        feeds["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
-
-    outputs = session.run(None, feeds)
-    # Reranker outputs logits — higher = more relevant
-    logits = outputs[0].flatten()
-    return logits.tolist()
+    passages = [
+        {"id": str(i), "text": c["text"][:500]}
+        for i, c in enumerate(candidates)
+    ]
+    reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
+    return [candidates[int(r["id"])] for r in reranked[:n]]
 
 
 def _rrf(ranked_lists: list[list[str]], k: int = 60) -> dict[str, float]:
@@ -102,7 +63,7 @@ def _build_where(topic: str | None, subtopic: str | None) -> str | None:
 
 
 class SearchEngine:
-    """Hybrid search with RRF fusion, cross-encoder reranking, parent expansion."""
+    """Hybrid search with RRF fusion, FlashRank reranking, parent expansion."""
 
     def __init__(self, store: Store | None = None):
         self.store = store or Store()
@@ -122,7 +83,7 @@ class SearchEngine:
         2. Vector search (semantic)
         3. FTS search (BM25 keyword)
         4. RRF fusion
-        5. Cross-encoder reranking
+        5. FlashRank cross-encoder reranking
         6. Parent window expansion
         """
         cfg = self._cfg
@@ -157,20 +118,8 @@ class SearchEngine:
             reverse=True,
         )[:n_results * 4]
 
-        # 5. Cross-encoder reranking
-        if candidates:
-            scores = _rerank_scores(query, [c["text"] for c in candidates])
-            if any(s != 0.0 for s in scores):
-                ranked = sorted(
-                    zip(scores, candidates),
-                    key=lambda x: x[0],
-                    reverse=True,
-                )
-                results = [c for _, c in ranked[:n_results]]
-            else:
-                results = candidates[:n_results]
-        else:
-            results = candidates[:n_results]
+        # 5. FlashRank reranking
+        results = _rerank(query, candidates, n_results)
 
         # 6. Parent window expansion
         results = [self._expand_to_parent(r) for r in results]

@@ -1,7 +1,13 @@
-"""Embedding — BGE-M3 via ONNX Runtime. No PyTorch required (~50MB vs ~2GB).
+"""Embedding — EmbeddingGemma-300M via ONNX Runtime. No PyTorch required.
 
-Downloads the ONNX model from HuggingFace on first run, then loads it
-with onnxruntime for fast CPU/GPU inference.
+Downloads the q4 quantized ONNX model (~188 MB) from HuggingFace on first
+run, then loads it with onnxruntime for fast CPU/GPU inference.
+
+Model: google/embeddinggemma-300m (ONNX export by onnx-community)
+  - #1 on MTEB for models under 500M params
+  - 768-dim dense vectors
+  - 100+ languages
+  - q4 quantization: identical accuracy, 6x smaller than fp32
 """
 
 from __future__ import annotations
@@ -15,25 +21,36 @@ from .config import get_config
 _session = None
 _tokenizer = None
 
+# Default ONNX variant filenames (configurable in config.yaml)
+_VARIANT_FILES = {
+    "fp32":  ("model.onnx",           "model.onnx_data"),
+    "q8":    ("model_quantized.onnx", "model_quantized.onnx_data"),
+    "q4":    ("model_q4.onnx",        "model_q4.onnx_data"),
+    "q4f16": ("model_q4f16.onnx",     "model_q4f16.onnx_data"),
+}
 
-def _model_dir() -> Path:
-    """Resolve where ONNX model files are cached."""
-    from huggingface_hub import snapshot_download
+
+def _download_model() -> Path:
+    """Download ONNX model files from HuggingFace (only the selected variant)."""
+    from huggingface_hub import hf_hub_download, snapshot_download
 
     cfg = get_config()
-    model_name = cfg.get("embedding.model", "BAAI/bge-m3")
-    # Download only the ONNX files + tokenizer (skip pytorch bins)
-    path = snapshot_download(
-        model_name,
-        allow_patterns=[
-            "onnx/*",
-            "tokenizer*",
-            "special_tokens_map.json",
-            "vocab.txt",
-            "sentencepiece*",
-        ],
-    )
-    return Path(path)
+    repo = cfg.get("embedding.model", "onnx-community/embeddinggemma-300m-ONNX")
+    variant = cfg.get("embedding.variant", "q4")
+
+    onnx_name, data_name = _VARIANT_FILES.get(variant, _VARIANT_FILES["q4"])
+
+    # Download only the specific variant + tokenizer (not the whole repo)
+    model_dir = Path(hf_hub_download(repo, f"onnx/{onnx_name}")).parent.parent
+    hf_hub_download(repo, f"onnx/{data_name}")
+    # Tokenizer files
+    for fname in ["tokenizer.json", "tokenizer_config.json", "special_tokens_map.json"]:
+        try:
+            hf_hub_download(repo, fname)
+        except Exception:
+            pass
+
+    return model_dir
 
 
 def _get_session_and_tokenizer():
@@ -47,20 +64,15 @@ def _get_session_and_tokenizer():
 
     cfg = get_config()
     device = cfg.embed_device
+    variant = cfg.get("embedding.variant", "q4")
+    onnx_name, _ = _VARIANT_FILES.get(variant, _VARIANT_FILES["q4"])
 
-    print(f"  Loading embedding model (ONNX) on {device}...")
-    model_path = _model_dir()
+    print(f"  Loading embedding model ({variant}) on {device}...")
+    model_path = _download_model()
 
-    # Find ONNX file
-    onnx_dir = model_path / "onnx"
-    onnx_file = onnx_dir / "model.onnx"
+    onnx_file = model_path / "onnx" / onnx_name
     if not onnx_file.exists():
-        # Some models use model_optimized.onnx or similar
-        onnx_files = list(onnx_dir.glob("*.onnx"))
-        if onnx_files:
-            onnx_file = onnx_files[0]
-        else:
-            raise FileNotFoundError(f"No .onnx file found in {onnx_dir}")
+        raise FileNotFoundError(f"ONNX file not found: {onnx_file}")
 
     # Set up providers
     if device == "cuda":
@@ -74,17 +86,11 @@ def _get_session_and_tokenizer():
 
     # Load tokenizer
     tok_file = model_path / "tokenizer.json"
-    if tok_file.exists():
-        _tokenizer = Tokenizer.from_file(str(tok_file))
-    else:
-        # Fallback: try loading from the model dir
-        from tokenizers import Tokenizer as Tok
-        _tokenizer = Tok.from_pretrained(str(model_path))
-
-    # Enable padding and truncation
-    from tokenizers import processors
-    _tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
-    _tokenizer.enable_truncation(max_length=8192)
+    if not tok_file.exists():
+        raise FileNotFoundError(f"tokenizer.json not found in {model_path}")
+    _tokenizer = Tokenizer.from_file(str(tok_file))
+    _tokenizer.enable_padding(pad_id=0, pad_token="<pad>")
+    _tokenizer.enable_truncation(max_length=2048)
 
     return _session, _tokenizer
 
@@ -100,6 +106,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     cfg = get_config()
     batch_size = cfg.get("embedding.batch_size", 32)
     session, tokenizer = _get_session_and_tokenizer()
+    input_names = [inp.name for inp in session.get_inputs()]
 
     all_embeddings: list[np.ndarray] = []
 
@@ -109,30 +116,22 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
         attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-        token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
 
         feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
-        # Some ONNX models expect token_type_ids
-        input_names = [inp.name for inp in session.get_inputs()]
         if "token_type_ids" in input_names:
-            feeds["token_type_ids"] = token_type_ids
+            feeds["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
 
         outputs = session.run(None, feeds)
-        # BGE models output last_hidden_state as first output
-        # Use CLS token (index 0) or mean pooling
-        last_hidden = outputs[0]  # (batch, seq_len, dim)
+        emb = outputs[0]
 
-        # Mean pooling over non-padded tokens
-        mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
-        summed = (last_hidden * mask_expanded).sum(axis=1)
-        counts = mask_expanded.sum(axis=1).clip(min=1e-9)
-        pooled = summed / counts
+        # Handle both (batch, dim) and (batch, seq_len, dim) output shapes
+        if emb.ndim == 3:
+            mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
+            emb = (emb * mask_expanded).sum(axis=1) / mask_expanded.sum(axis=1).clip(min=1e-9)
 
         # L2 normalize
-        norms = np.linalg.norm(pooled, axis=1, keepdims=True).clip(min=1e-9)
-        normalized = pooled / norms
-
-        all_embeddings.append(normalized)
+        norms = np.linalg.norm(emb, axis=1, keepdims=True).clip(min=1e-9)
+        all_embeddings.append(emb / norms)
 
     result = np.concatenate(all_embeddings, axis=0)
     return result.tolist()
@@ -140,4 +139,4 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
 def embed_dim() -> int:
     """Return the configured embedding dimension."""
-    return get_config().get("embedding.dim", 1024)
+    return get_config().get("embedding.dim", 768)

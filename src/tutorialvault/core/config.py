@@ -15,8 +15,9 @@ _DEFAULTS = {
         "summaries_table": "episode_summaries",
     },
     "embedding": {
-        "model": "BAAI/bge-m3",
-        "dim": 1024,
+        "model": "onnx-community/embeddinggemma-300m-ONNX",
+        "variant": "q4",
+        "dim": 768,
         "device": "auto",
         "batch_size": 32,
     },
@@ -25,8 +26,7 @@ _DEFAULTS = {
         "overlap_sec": 15,
     },
     "search": {
-        "reranker_model": "BAAI/bge-reranker-v2-m3",
-        "reranker_max_length": 512,
+        "reranker_model": "ms-marco-MiniLM-L-12-v2",
         "parent_window_sec": 150,
         "candidate_count": 30,
         "rrf_k": 60,
