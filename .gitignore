@@ -45,3 +45,5 @@ eval_results/
 misc/
 claude_isolated/
 *.txt
+tests/test_audio*.wav
+tests/test_output.*
