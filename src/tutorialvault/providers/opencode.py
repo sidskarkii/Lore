@@ -1,11 +1,15 @@
 """OpenCode provider — uses the `opencode` CLI with 6 free models.
 
-Invocation:
+Invocation (non-interactive):
     opencode run "{prompt}" -m opencode/minimax-m2.5-free --format json
+
+Output format (--format json): JSONL events, one per line.
+    - {"type":"text","part":{"text":"the answer"}}
+    - {"type":"step_start",...}  — ignore
+    - {"type":"step_finish",...} — ignore
 
 Auth: OAuth for Anthropic/OpenAI, or use free opencode/* models with no auth.
 Check: `opencode auth list`
-Free models: opencode/mimo-v2-omni-free, opencode/minimax-m2.5-free, etc.
 """
 
 from __future__ import annotations
@@ -18,7 +22,6 @@ from typing import Iterator
 from .base import Provider, ProviderModel, ProviderStatus
 from ..core.config import get_config
 
-# Known free models (verified on this machine)
 _FREE_MODELS = [
     ProviderModel(id="opencode/minimax-m2.5-free", name="MiniMax M2.5 (free)", free=True, context_window=204_800),
     ProviderModel(id="opencode/mimo-v2-omni-free", name="MiMo V2 Omni (free)", free=True, context_window=262_144),
@@ -52,27 +55,40 @@ class OpenCodeProvider(Provider):
         except Exception:
             pass
 
-        # Check auth
         authenticated = False
-        user = None
         try:
             r = subprocess.run(
                 [binary, "auth", "list"],
                 capture_output=True, text=True, timeout=10,
             )
-            output = r.stdout
-            # opencode auth list shows credentials with bullet points
-            authenticated = "credential" in output.lower() or "oauth" in output.lower()
+            authenticated = "credential" in r.stdout.lower() or "oauth" in r.stdout.lower()
         except Exception:
             pass
 
         return ProviderStatus(
-            installed=True,
-            authenticated=authenticated,
-            version=version,
-            user=user,
-            models=list(_FREE_MODELS),
+            installed=True, authenticated=authenticated,
+            version=version, models=list(_FREE_MODELS),
         )
+
+    def _parse_jsonl(self, output: str) -> str:
+        """Extract answer from OpenCode JSONL.
+
+        Answer is in: {"type":"text","part":{"text":"Hello"}}
+        """
+        parts = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                if event.get("type") == "text":
+                    text = event.get("part", {}).get("text", "")
+                    if text:
+                        parts.append(text)
+            except json.JSONDecodeError:
+                continue
+        return "".join(parts).strip()
 
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         binary = self._bin()
@@ -81,35 +97,21 @@ class OpenCodeProvider(Provider):
 
         cfg = get_config()
         model = model or cfg.get("provider.opencode.model", "opencode/minimax-m2.5-free")
-
-        # Flatten messages into a single prompt
         prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
         result = subprocess.run(
             [binary, "run", prompt, "-m", model, "--format", "json"],
             capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
         )
 
         if result.returncode != 0:
-            raise RuntimeError(f"OpenCode error: {result.stderr[:500]}")
+            raise RuntimeError(f"OpenCode error (exit {result.returncode}): {result.stderr[:300]}")
 
-        # Parse JSON output — opencode emits JSONL events
-        text_parts = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                # Look for text content in various event formats
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", ""))
-                    if content:
-                        text_parts.append(content)
-            except json.JSONDecodeError:
-                text_parts.append(line)
-
-        return "\n".join(text_parts) if text_parts else result.stdout.strip()
+        answer = self._parse_jsonl(result.stdout)
+        if not answer:
+            raise RuntimeError("OpenCode returned empty response")
+        return answer
 
     def stream(self, messages: list[dict], model: str | None = None) -> Iterator[str]:
         binary = self._bin()
@@ -122,7 +124,8 @@ class OpenCodeProvider(Provider):
 
         proc = subprocess.Popen(
             [binary, "run", prompt, "-m", model, "--format", "json"],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
         )
 
         for line in proc.stdout:
@@ -131,11 +134,11 @@ class OpenCodeProvider(Provider):
                 continue
             try:
                 event = json.loads(line)
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", ""))
-                    if content:
-                        yield content
+                if event.get("type") == "text":
+                    text = event.get("part", {}).get("text", "")
+                    if text:
+                        yield text
             except json.JSONDecodeError:
-                yield line
+                continue
 
         proc.wait()

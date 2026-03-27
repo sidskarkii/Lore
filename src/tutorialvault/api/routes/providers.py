@@ -101,6 +101,30 @@ def install_provider(req: InstallRequest):
 
 
 @router.post(
+    "/api/providers/authorize",
+    summary="Authorize a provider to use existing credentials",
+    description=(
+        "For providers like Claude Code that need permission to copy "
+        "credentials into an isolated config. The user's main setup is not modified."
+    ),
+)
+def authorize_provider(req: InstallRequest):
+    registry = get_registry()
+    provider = registry.get(req.provider)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Unknown provider: {req.provider}")
+
+    if hasattr(provider, "authorize"):
+        success = provider.authorize()
+        return {
+            "success": success,
+            "provider": req.provider,
+            "error": None if success else "Could not find credentials to copy.",
+        }
+    return {"success": True, "provider": req.provider, "error": None}
+
+
+@router.post(
     "/api/providers/test",
     response_model=TestConnectionResponse,
     summary="Test a provider connection",

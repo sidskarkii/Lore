@@ -1,15 +1,23 @@
 """Kilo CLI provider — 10 free models, no API key needed.
 
-Invocation:
-    kilo --auto --json --yolo -M "kilo-auto/free" --timeout 60 "{prompt}"
+Invocation (non-interactive):
+    kilo --auto --json --nosplash --yolo -M "kilo-auto/free" "{prompt}"
+
+Output format (--json): JSONL mixed with ANSI escape codes.
+    Lines contain ANSI control sequences that must be stripped.
+    Extract JSON with regex, then parse.
+
+    Answer events: {"say":"text","partial":false,"content":"the answer"}
+    Reasoning:     {"say":"reasoning","partial":true,"content":"..."}  — ignore
+    API events:    {"say":"api_req_started",...}  — ignore
 
 Auth: Auto-authenticated on install. `kilo auth` to manage.
-Free models: kilo-auto/free, xiaomi/mimo-v2-pro:free, nvidia/nemotron-3-super:free, etc.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from typing import Iterator
@@ -17,7 +25,6 @@ from typing import Iterator
 from .base import Provider, ProviderModel, ProviderStatus
 from ..core.config import get_config
 
-# Known free models (verified via `kilo models` output)
 _FREE_MODELS = [
     ProviderModel(id="kilo-auto/free", name="Kilo Auto Free", free=True, context_window=204_800),
     ProviderModel(id="xiaomi/mimo-v2-pro:free", name="MiMo V2 Pro (free)", free=True, context_window=1_048_576),
@@ -31,6 +38,35 @@ _FREE_MODELS = [
     ProviderModel(id="openrouter/free", name="OpenRouter Free", free=True, context_window=200_000),
 ]
 
+# Regex to strip ANSI escape codes
+_ANSI_RE = re.compile(r'(\x1b\[[0-9;]*[A-Za-z]|\x1b\][^\x07]*\x07|\x1b\]0;[^\x07]*)')
+
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from text."""
+    return _ANSI_RE.sub('', text)
+
+
+def _extract_json_objects(text: str) -> list[dict]:
+    """Extract JSON objects from text that may contain ANSI codes."""
+    cleaned = _strip_ansi(text)
+    results = []
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if not line or not line.startswith('{'):
+            continue
+        try:
+            results.append(json.loads(line))
+        except json.JSONDecodeError:
+            # Try to extract JSON from within the line
+            match = re.search(r'\{.*\}', line)
+            if match:
+                try:
+                    results.append(json.loads(match.group()))
+                except json.JSONDecodeError:
+                    continue
+    return results
+
 
 class KiloProvider(Provider):
     name = "kilo"
@@ -38,7 +74,6 @@ class KiloProvider(Provider):
     install_command = "npm install -g @kilocode/cli"
 
     def _bin(self) -> str | None:
-        # kilo CLI registers as both `kilo` and `kilocode`
         return shutil.which("kilo") or shutil.which("kilocode")
 
     def detect(self) -> bool:
@@ -56,13 +91,32 @@ class KiloProvider(Provider):
         except Exception:
             pass
 
-        # Kilo auto-authenticates, so if installed it's ready
         return ProviderStatus(
-            installed=True,
-            authenticated=True,
-            version=version,
-            models=list(_FREE_MODELS),
+            installed=True, authenticated=True,
+            version=version, models=list(_FREE_MODELS),
         )
+
+    def _parse_output(self, output: str) -> str:
+        """Extract final answer from Kilo output.
+
+        Answer is the last non-partial text event:
+        {"say":"text","partial":false,"content":"Hello"}
+        """
+        events = _extract_json_objects(output)
+
+        # Prefer completion_result, fall back to last non-partial text
+        for event in reversed(events):
+            if event.get("say") == "completion_result":
+                return event.get("content", "").strip()
+
+        for event in reversed(events):
+            if event.get("say") == "text" and not event.get("partial", True):
+                content = event.get("content", "")
+                # Skip if it's the original user prompt echoed back
+                if content and event.get("source") != "user":
+                    return content.strip()
+
+        return ""
 
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         binary = self._bin()
@@ -76,33 +130,22 @@ class KiloProvider(Provider):
         result = subprocess.run(
             [
                 binary,
-                "--auto", "--json", "--yolo",
+                "--auto", "--json", "--nosplash", "--yolo",
                 "-M", model,
                 "--timeout", "60",
                 prompt,
             ],
             capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
         )
 
         if result.returncode != 0:
-            raise RuntimeError(f"Kilo error: {result.stderr[:500]}")
+            raise RuntimeError(f"Kilo error (exit {result.returncode}): {result.stderr[:300]}")
 
-        # Parse JSON output
-        text_parts = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", event.get("message", "")))
-                    if content:
-                        text_parts.append(content)
-            except json.JSONDecodeError:
-                text_parts.append(line)
-
-        return "\n".join(text_parts) if text_parts else result.stdout.strip()
+        answer = self._parse_output(result.stdout)
+        if not answer:
+            raise RuntimeError("Kilo returned empty response")
+        return answer
 
     def stream(self, messages: list[dict], model: str | None = None) -> Iterator[str]:
         binary = self._bin()
@@ -116,25 +159,27 @@ class KiloProvider(Provider):
         proc = subprocess.Popen(
             [
                 binary,
-                "--auto", "--json", "--yolo",
+                "--auto", "--json", "--nosplash", "--yolo",
                 "-M", model,
                 "--timeout", "60",
                 prompt,
             ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
         )
 
         for line in proc.stdout:
-            line = line.strip()
-            if not line:
+            cleaned = _strip_ansi(line).strip()
+            if not cleaned or not cleaned.startswith('{'):
                 continue
             try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", ""))
+                event = json.loads(cleaned)
+                # Yield partial text events for streaming
+                if event.get("say") == "text":
+                    content = event.get("content", "")
                     if content:
                         yield content
             except json.JSONDecodeError:
-                yield line
+                continue
 
         proc.wait()

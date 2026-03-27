@@ -40,3 +40,8 @@ config.local.yaml
 
 # Eval outputs
 eval_results/
+
+# Reference repos
+misc/
+claude_isolated/
+*.txt

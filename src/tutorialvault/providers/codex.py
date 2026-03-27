@@ -1,10 +1,18 @@
 """Codex CLI provider — uses OpenAI's `codex` CLI with existing subscription.
 
-Invocation:
-    codex exec "{prompt}" -m o4-mini --json --full-auto --ephemeral
+Invocation (non-interactive):
+    codex exec "{prompt}" --json --full-auto --ephemeral
+
+Output format (--json): JSONL events, one per line.
+    - {"type":"item.completed","item":{"type":"agent_message","text":"the answer"}}
+    - {"type":"turn.completed","usage":{...}}
+    - {"type":"error","message":"..."}
 
 Auth: OAuth via `codex login` or OPENAI_API_KEY env var.
 Check: `codex login status`
+
+Note: Don't specify --model unless you know it's available on the account.
+      Default model works for ChatGPT subscribers.
 """
 
 from __future__ import annotations
@@ -52,76 +60,86 @@ class CodexProvider(Provider):
             pass
 
         models = [
-            ProviderModel(id="o4-mini", name="O4 Mini", context_window=128_000),
-            ProviderModel(id="o3", name="O3", context_window=200_000),
-            ProviderModel(id="gpt-4.1", name="GPT-4.1", context_window=1_000_000),
+            ProviderModel(id="default", name="Default (account default)", context_window=128_000),
         ]
 
         return ProviderStatus(
-            installed=True,
-            authenticated=authenticated,
-            version=version,
-            models=models,
+            installed=True, authenticated=authenticated,
+            version=version, models=models,
         )
+
+    def _parse_jsonl(self, output: str) -> str:
+        """Extract answer text from Codex JSONL output.
+
+        Answer is in: {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+        Errors in:    {"type":"error","message":"..."}
+        """
+        parts = []
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+                etype = event.get("type", "")
+
+                if etype == "error":
+                    raise RuntimeError(f"Codex error: {event.get('message', 'unknown')}")
+
+                if etype == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            parts.append(text)
+            except json.JSONDecodeError:
+                continue
+
+        return "\n".join(parts)
 
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         binary = self._bin()
         if not binary:
             raise RuntimeError("Codex CLI not found")
 
-        cfg = get_config()
-        model = model or cfg.get("provider.codex.model", "o4-mini")
         prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
+        cmd = [
+            binary, "exec", prompt,
+            "--json",
+            "--full-auto",
+            "--ephemeral",
+        ]
+
         result = subprocess.run(
-            [
-                binary, "exec", prompt,
-                "-m", model,
-                "--json",
-                "--full-auto",
-                "--ephemeral",
-            ],
-            capture_output=True, text=True, timeout=120,
+            cmd, capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",
         )
 
         if result.returncode != 0:
-            raise RuntimeError(f"Codex error: {result.stderr[:500]}")
+            raise RuntimeError(f"Codex error (exit {result.returncode}): {result.stderr[:300]}")
 
-        # Parse JSONL output
-        text_parts = []
-        for line in result.stdout.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", event.get("message", "")))
-                    if content:
-                        text_parts.append(content)
-            except json.JSONDecodeError:
-                text_parts.append(line)
-
-        return "\n".join(text_parts) if text_parts else result.stdout.strip()
+        answer = self._parse_jsonl(result.stdout)
+        if not answer:
+            raise RuntimeError("Codex returned empty response")
+        return answer
 
     def stream(self, messages: list[dict], model: str | None = None) -> Iterator[str]:
         binary = self._bin()
         if not binary:
             raise RuntimeError("Codex CLI not found")
 
-        cfg = get_config()
-        model = model or cfg.get("provider.codex.model", "o4-mini")
         prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
 
         proc = subprocess.Popen(
             [
                 binary, "exec", prompt,
-                "-m", model,
                 "--json",
                 "--full-auto",
                 "--ephemeral",
             ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace",
         )
 
         for line in proc.stdout:
@@ -130,11 +148,13 @@ class CodexProvider(Provider):
                 continue
             try:
                 event = json.loads(line)
-                if isinstance(event, dict):
-                    content = event.get("content", event.get("text", ""))
-                    if content:
-                        yield content
+                if event.get("type") == "item.completed":
+                    item = event.get("item", {})
+                    if item.get("type") == "agent_message":
+                        text = item.get("text", "")
+                        if text:
+                            yield text
             except json.JSONDecodeError:
-                yield line
+                continue
 
         proc.wait()
