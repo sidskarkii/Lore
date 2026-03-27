@@ -132,10 +132,10 @@ class KiloProvider(Provider):
                 binary,
                 "--auto", "--json", "--nosplash", "--yolo",
                 "-M", model,
-                "--timeout", "60",
+                "--timeout", "180",
                 prompt,
             ],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=240,
             encoding="utf-8", errors="replace",
         )
 
@@ -161,7 +161,7 @@ class KiloProvider(Provider):
                 binary,
                 "--auto", "--json", "--nosplash", "--yolo",
                 "-M", model,
-                "--timeout", "60",
+                "--timeout", "180",
                 prompt,
             ],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
