@@ -46,13 +46,14 @@ search:
 
 # --- Transcription ---
 transcription:
-  # Whisper model size: tiny, base, small, medium, large-v2, large-v3
-  model: large-v2
-  # Device for whisper
-  device: cuda
-  # Compute type: float16, int8, int8_float16
-  compute_type: float16
-  # Language (null = auto-detect)
+  # Whisper model size: tiny, base, small.en, small, medium, large-v2, large-v3
+  # small.en is the best speed/quality tradeoff for English on CPU
+  model: small.en
+  # Device: cuda (GPU) or cpu
+  device: cpu
+  # Compute type: float16 (GPU), int8 (CPU fast), int8_float16 (GPU fast)
+  compute_type: int8
+  # Language: en, null (auto-detect), or any language code
   language: en
 
 # --- Provider (LLM inference) ---
