@@ -51,3 +51,7 @@ tests/test_output.*
 # Claude Code / AI tool artifacts
 .claude/
 .kilocodemodes
+
+# UI
+ui/node_modules/
+ui/dist/
