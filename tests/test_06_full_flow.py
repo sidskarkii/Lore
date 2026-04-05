@@ -17,7 +17,7 @@ def test_full_flow():
     print("  1. INGEST — 3 episodes from course SRTs")
     print("=" * 60)
 
-    from tutorialvault.core.ingest import Ingester
+    from lore.core.ingest import Ingester
 
     ing = Ingester()
 
@@ -64,7 +64,7 @@ def test_full_flow():
     print("  3. SEARCH — 3 queries")
     print("=" * 60)
 
-    from tutorialvault.core.search import SearchEngine
+    from lore.core.search import SearchEngine
     engine = SearchEngine(ing.store)
 
     queries = [
@@ -88,7 +88,7 @@ def test_full_flow():
     print("  4. CHAT — ask a question via active provider")
     print("=" * 60)
 
-    from tutorialvault.providers.registry import get_registry
+    from lore.providers.registry import get_registry
     registry = get_registry()
     provider = registry.active
     print(f"  Provider: {provider.name if provider else 'NONE'}")
@@ -127,7 +127,7 @@ def test_full_flow():
     print("  5. PERSIST — save chat to SQLite")
     print("=" * 60)
 
-    from tutorialvault.core.database import Database
+    from lore.core.database import Database
     import tempfile
 
     db = Database(os.path.join(tempfile.gettempdir(), "tv_test_flow.db"))
@@ -162,7 +162,7 @@ def test_full_flow():
     print("  6. API — verify all routes compile")
     print("=" * 60)
 
-    from tutorialvault.api.app import create_app
+    from lore.api.app import create_app
     app = create_app()
     routes = [r.path for r in app.routes if hasattr(r, "path") and r.path.startswith("/api")]
     print(f"  {len(routes)} API routes registered")

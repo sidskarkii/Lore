@@ -28,10 +28,10 @@ def bench():
     print("  SETUP: Ingest 3 episodes")
     print("=" * 70)
 
-    from tutorialvault.core.ingest import Ingester
-    from tutorialvault.core.search import SearchEngine, _rerank_with_scores, _rrf, _rerank
-    from tutorialvault.core.embed import embed_texts
-    from tutorialvault.core.store import Store
+    from lore.core.ingest import Ingester
+    from lore.core.search import SearchEngine, _rerank_with_scores, _rrf, _rerank
+    from lore.core.embed import embed_texts
+    from lore.core.store import Store
 
     ing = Ingester()
     srts = [

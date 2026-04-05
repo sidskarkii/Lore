@@ -4,7 +4,7 @@ import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.chdir(os.path.join(os.path.dirname(__file__), ".."))
 
-from tutorialvault.providers.registry import ProviderRegistry
+from lore.providers.registry import ProviderRegistry
 
 TEST_MESSAGES = [{"role": "user", "content": "Say 'hello' in exactly one word. Nothing else."}]
 

@@ -13,7 +13,7 @@ def start_server():
     env = os.environ.copy()
     env["PYTHONPATH"] = "src"
     proc = subprocess.Popen(
-        [sys.executable, "-m", "uvicorn", "tutorialvault.api.app:create_app",
+        [sys.executable, "-m", "uvicorn", "lore.api.app:create_app",
          "--factory", "--host", "127.0.0.1", "--port", str(PORT)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env,

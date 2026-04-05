@@ -17,10 +17,10 @@ def test_all_providers():
     print("  1. SETUP: Ingest 3 episodes")
     print("=" * 70)
 
-    from tutorialvault.core.ingest import Ingester
-    from tutorialvault.core.search import SearchEngine
-    from tutorialvault.core.database import Database
-    from tutorialvault.providers.registry import get_registry
+    from lore.core.ingest import Ingester
+    from lore.core.search import SearchEngine
+    from lore.core.database import Database
+    from lore.providers.registry import get_registry
     import tempfile
 
     ing = Ingester()
@@ -169,7 +169,7 @@ def test_all_providers():
     print("  4. API ROUTES")
     print("=" * 70)
 
-    from tutorialvault.api.app import create_app
+    from lore.api.app import create_app
     app = create_app()
     routes = [r.path for r in app.routes if hasattr(r, "path") and r.path.startswith("/api")]
     print(f"  {len(routes)} routes registered")

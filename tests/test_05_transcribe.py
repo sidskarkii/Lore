@@ -4,7 +4,7 @@ import sys, os, time
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.chdir(os.path.join(os.path.dirname(__file__), ".."))
 
-from tutorialvault.core.transcribe import Transcriber
+from lore.core.transcribe import Transcriber
 
 SHORT_AUDIO = "tests/test_audio.wav"        # 2 min
 LONG_AUDIO = "tests/test_audio_long.wav"    # 14.5 min

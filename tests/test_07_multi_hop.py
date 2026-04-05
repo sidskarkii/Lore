@@ -44,7 +44,7 @@ def test_multi_hop():
     print("  1. INGEST — 3 episodes from course SRTs")
     print("=" * 60)
 
-    from tutorialvault.core.ingest import Ingester
+    from lore.core.ingest import Ingester
 
     ing = Ingester()
 
@@ -75,7 +75,7 @@ def test_multi_hop():
     print("  2. MULTI-HOP SEARCH — StubProvider")
     print("=" * 60)
 
-    from tutorialvault.core.search import SearchEngine
+    from lore.core.search import SearchEngine
     engine = SearchEngine(ing.store)
     stub = StubProvider()
 
@@ -152,7 +152,7 @@ def test_multi_hop():
     print("  7. REAL PROVIDER — live decomposition")
     print("=" * 60)
 
-    from tutorialvault.providers.registry import get_registry
+    from lore.providers.registry import get_registry
     registry = get_registry()
     provider = registry.active
 

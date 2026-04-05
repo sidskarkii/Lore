@@ -4,7 +4,7 @@ import sys, os, tempfile
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 os.chdir(os.path.join(os.path.dirname(__file__), ".."))
 
-from tutorialvault.core.database import Database
+from lore.core.database import Database
 
 
 def test_database():
