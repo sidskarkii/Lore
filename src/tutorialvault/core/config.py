@@ -30,6 +30,8 @@ _DEFAULTS = {
         "parent_window_sec": 150,
         "candidate_count": 30,
         "rrf_k": 60,
+        "multi_hop_max_queries": 4,
+        "multi_hop_relevance_threshold": 0.1,
     },
     "transcription": {
         "model": "large-v2",

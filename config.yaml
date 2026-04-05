@@ -43,6 +43,10 @@ search:
   candidate_count: 30
   # RRF constant (higher = less weight on top ranks)
   rrf_k: 60
+  # Multi-hop: max sub-queries generated from a complex question
+  multi_hop_max_queries: 4
+  # Minimum FlashRank score to keep a result (0.0-1.0, lower = more permissive)
+  multi_hop_relevance_threshold: 0.1
 
 # --- Transcription ---
 transcription:
@@ -68,7 +72,7 @@ provider:
   codex:
     model: o4-mini
   kilo:
-    model: kilo-auto/free
+    model: x-ai/grok-code-fast-1:optimized:free
   local_gguf:
     model_path: null  # path to .gguf file
     n_gpu_layers: -1  # -1 = all layers on GPU

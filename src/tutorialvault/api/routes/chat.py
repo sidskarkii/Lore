@@ -1,7 +1,8 @@
 """Chat endpoint — RAG-grounded conversation with streaming support.
 
-POST /api/chat        — full response (non-streaming)
-WS   /api/chat/stream — WebSocket streaming
+POST /api/chat         — full response (non-streaming)
+POST /api/chat/stream  — SSE streaming (preferred)
+WS   /api/chat/ws      — WebSocket streaming (legacy/desktop)
 """
 
 from __future__ import annotations
@@ -129,7 +130,16 @@ def chat(req: ChatRequest):
 
     try:
         engine = SearchEngine()
-        sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+        if req.multi_hop:
+            try:
+                sources = engine.search_multi_hop(
+                    last_user_msg, provider=provider,
+                    n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic,
+                )
+            except Exception:
+                sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+        else:
+            sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
     except Exception:
         sources = []
 
@@ -173,8 +183,8 @@ def chat(req: ChatRequest):
     )
 
 
-@router.websocket("/api/chat/stream")
-async def chat_stream(ws: WebSocket):
+@router.websocket("/api/chat/ws")
+async def chat_stream_ws(ws: WebSocket):
     """WebSocket endpoint for streaming chat responses.
 
     Client sends a ChatRequest JSON, server streams back:
@@ -205,7 +215,17 @@ async def chat_stream(ws: WebSocket):
 
         try:
             engine = SearchEngine()
-            sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+            if req.multi_hop:
+                await ws.send_text(json.dumps({"type": "status", "data": "Decomposing query into sub-queries..."}))
+                try:
+                    sources = engine.search_multi_hop(
+                        last_user_msg, provider=provider,
+                        n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic,
+                    )
+                except Exception:
+                    sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+            else:
+                sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
         except Exception:
             sources = []
 
@@ -255,3 +275,85 @@ async def chat_stream(ws: WebSocket):
             await ws.close()
         except Exception:
             pass
+
+
+@router.post(
+    "/api/chat/stream",
+    summary="Stream chat response via SSE",
+    description=(
+        "Same pipeline as /api/chat but returns a Server-Sent Events stream. "
+        "Events: source (retrieved sources), session (session ID), token "
+        "(response chunks), done (completion). Preferred over WebSocket for "
+        "unidirectional streaming — simpler clients, auto-reconnect, HTTP/2 "
+        "multiplexing."
+    ),
+)
+async def chat_stream_sse(req: ChatRequest):
+    from sse_starlette.sse import EventSourceResponse
+
+    registry = get_registry()
+    provider = registry.get(req.provider) if req.provider else registry.active
+    if not provider:
+        return EventSourceResponse(
+            iter([{"event": "error", "data": "No active provider"}])
+        )
+
+    # Extract last user message
+    last_user_msg = ""
+    for m in reversed(req.messages):
+        if m.role == "user":
+            last_user_msg = m.content
+            break
+
+    async def event_generator():
+        try:
+            # Search
+            engine = SearchEngine()
+            if req.multi_hop:
+                yield {"event": "status", "data": "Decomposing query into sub-queries..."}
+                try:
+                    sources = engine.search_multi_hop(
+                        last_user_msg, provider=provider,
+                        n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic,
+                    )
+                except Exception:
+                    sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+            else:
+                sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+
+            # Send sources
+            for s in sources:
+                yield {
+                    "event": "source",
+                    "data": json.dumps({
+                        "text": s.get("text", "")[:500],
+                        "collection_display": s.get("collection_display", ""),
+                        "episode_title": s.get("episode_title", ""),
+                        "timestamp": s.get("timestamp", "00:00"),
+                        "start_sec": s.get("start_sec", 0),
+                        "end_sec": s.get("end_sec", 0),
+                        "url": s.get("url", ""),
+                    }),
+                }
+
+            # Create/resume session
+            db = get_database()
+            session_id = _get_or_create_session(req, provider.name, req.model)
+            db.add_message(session_id, "user", last_user_msg)
+            yield {"event": "session", "data": session_id}
+
+            # Stream LLM response
+            rag_messages = _build_rag_messages(req.messages, sources)
+            full_response = ""
+            for chunk in provider.stream(rag_messages, model=req.model):
+                full_response += chunk
+                yield {"event": "token", "data": chunk}
+
+            # Persist
+            db.add_message(session_id, "assistant", full_response, sources=_sources_for_db(sources))
+            yield {"event": "done", "data": session_id}
+
+        except Exception as e:
+            yield {"event": "error", "data": str(e)}
+
+    return EventSourceResponse(event_generator())

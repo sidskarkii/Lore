@@ -50,7 +50,8 @@ class OpenCodeProvider(Provider):
 
         version = None
         try:
-            r = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=10)
+            r = subprocess.run([binary, "--version"], capture_output=True, text=True,
+                               timeout=10, encoding="utf-8", errors="replace")
             version = r.stdout.strip() if r.returncode == 0 else None
         except Exception:
             pass
@@ -60,6 +61,7 @@ class OpenCodeProvider(Provider):
             r = subprocess.run(
                 [binary, "auth", "list"],
                 capture_output=True, text=True, timeout=10,
+                encoding="utf-8", errors="replace",
             )
             authenticated = "credential" in r.stdout.lower() or "oauth" in r.stdout.lower()
         except Exception:
@@ -90,6 +92,14 @@ class OpenCodeProvider(Provider):
                 continue
         return "".join(parts).strip()
 
+    def _build_prompt(self, messages: list[dict], max_len: int = 7000) -> str:
+        """Build prompt string, truncating if needed for CLI argument limits."""
+        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        if len(prompt) > max_len:
+            # Keep system + user structure, truncate the content
+            prompt = prompt[:max_len] + "\n\n[truncated for CLI length]"
+        return prompt
+
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         binary = self._bin()
         if not binary:
@@ -97,10 +107,14 @@ class OpenCodeProvider(Provider):
 
         cfg = get_config()
         model = model or cfg.get("provider.opencode.model", "opencode/minimax-m2.5-free")
-        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        prompt = self._build_prompt(messages)
+
+        # Sanitize prompt: replace newlines with spaces to avoid shell issues,
+        # collapse multi-role format into a single block
+        clean_prompt = prompt.replace("\r\n", " ").replace("\n", " ")
 
         result = subprocess.run(
-            [binary, "run", prompt, "-m", model, "--format", "json"],
+            [binary, "run", clean_prompt, "-m", model, "--format", "json"],
             capture_output=True, text=True, timeout=120,
             encoding="utf-8", errors="replace",
         )
@@ -120,10 +134,12 @@ class OpenCodeProvider(Provider):
 
         cfg = get_config()
         model = model or cfg.get("provider.opencode.model", "opencode/minimax-m2.5-free")
-        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        prompt = self._build_prompt(messages)
+
+        clean_prompt = prompt.replace("\r\n", " ").replace("\n", " ")
 
         proc = subprocess.Popen(
-            [binary, "run", prompt, "-m", model, "--format", "json"],
+            [binary, "run", clean_prompt, "-m", model, "--format", "json"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )

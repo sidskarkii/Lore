@@ -97,22 +97,20 @@ class CodexProvider(Provider):
 
         return "\n".join(parts)
 
+    def _build_prompt(self, messages: list[dict]) -> str:
+        return "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         binary = self._bin()
         if not binary:
             raise RuntimeError("Codex CLI not found")
 
-        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        prompt = self._build_prompt(messages)
 
-        cmd = [
-            binary, "exec", prompt,
-            "--json",
-            "--full-auto",
-            "--ephemeral",
-        ]
-
+        # Use stdin for long prompts to avoid Windows CLI argument length limits
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120,
+            [binary, "exec", "-", "--json", "--full-auto", "--ephemeral"],
+            input=prompt, capture_output=True, text=True, timeout=120,
             encoding="utf-8", errors="replace",
         )
 
@@ -120,6 +118,15 @@ class CodexProvider(Provider):
             raise RuntimeError(f"Codex error (exit {result.returncode}): {result.stderr[:300]}")
 
         answer = self._parse_jsonl(result.stdout)
+        if not answer:
+            # Fallback: try with prompt as argument (short prompts)
+            result = subprocess.run(
+                [binary, "exec", prompt[:8000], "--json", "--full-auto", "--ephemeral"],
+                capture_output=True, text=True, timeout=120,
+                encoding="utf-8", errors="replace",
+            )
+            answer = self._parse_jsonl(result.stdout)
+
         if not answer:
             raise RuntimeError("Codex returned empty response")
         return answer
@@ -129,18 +136,15 @@ class CodexProvider(Provider):
         if not binary:
             raise RuntimeError("Codex CLI not found")
 
-        prompt = "\n\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
+        prompt = self._build_prompt(messages)
 
         proc = subprocess.Popen(
-            [
-                binary, "exec", prompt,
-                "--json",
-                "--full-auto",
-                "--ephemeral",
-            ],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            [binary, "exec", "-", "--json", "--full-auto", "--ephemeral"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )
+        proc.stdin.write(prompt)
+        proc.stdin.close()
 
         for line in proc.stdout:
             line = line.strip()

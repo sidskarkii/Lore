@@ -59,6 +59,7 @@ class ChatRequest(BaseModel):
     subtopic: str | None = Field(None, description="Filter search by subtopic")
     model: str | None = Field(None, description="Override the active provider's model")
     provider: str | None = Field(None, description="Override the active provider")
+    multi_hop: bool = Field(False, description="Use multi-hop search for complex cross-tutorial queries")
 
 
 class ChatResponse(BaseModel):

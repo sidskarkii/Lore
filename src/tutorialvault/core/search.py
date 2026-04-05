@@ -1,6 +1,13 @@
-"""Search — hybrid retrieval with RRF fusion, FlashRank reranking, and parent expansion."""
+"""Search — hybrid retrieval with RRF fusion, FlashRank reranking, and parent expansion.
+
+Includes multi-hop search: decomposes complex queries into sub-queries via an
+LLM provider, runs separate search passes, then combines and reranks results.
+Inspired by Chroma Context-1's agentic search pattern, implemented lightweight.
+"""
 
 from __future__ import annotations
+
+import re
 
 from .chunk import fmt_timestamp
 from .config import get_config
@@ -27,11 +34,11 @@ def _get_ranker():
     return _ranker
 
 
-def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
-    """Rerank candidates using FlashRank. Returns top n."""
+def _rerank_with_scores(query: str, candidates: list[dict], n: int) -> list[tuple[dict, float]]:
+    """Rerank candidates using FlashRank. Returns top n as (candidate, score) tuples."""
     ranker = _get_ranker()
     if ranker is None:
-        return candidates[:n]
+        return [(c, 1.0) for c in candidates[:n]]
 
     from flashrank import RerankRequest
 
@@ -40,7 +47,12 @@ def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
         for i, c in enumerate(candidates)
     ]
     reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
-    return [candidates[int(r["id"])] for r in reranked[:n]]
+    return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
+
+
+def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
+    """Rerank candidates using FlashRank. Returns top n."""
+    return [c for c, _ in _rerank_with_scores(query, candidates, n)]
 
 
 def _rrf(ranked_lists: list[list[str]], k: int = 60) -> dict[str, float]:
@@ -60,6 +72,26 @@ def _build_where(topic: str | None, subtopic: str | None) -> str | None:
     if subtopic:
         parts.append(f"subtopic = '{subtopic.lower()}'")
     return " AND ".join(parts) if parts else None
+
+
+_DECOMPOSE_PROMPT = (
+    "Break this question into {max_queries} or fewer simpler search queries that "
+    "together would find all the information needed to answer it. Return one query "
+    "per line, nothing else. If the question is already simple, return it unchanged "
+    "on one line.\n\nQuestion: {query}"
+)
+
+_STRIP_NUMBERING = re.compile(r"^\s*[\d]+[.):\-]\s*")
+
+
+def _parse_sub_queries(text: str, max_queries: int) -> list[str]:
+    """Parse LLM response into a list of sub-queries."""
+    queries = []
+    for line in text.strip().splitlines():
+        line = _STRIP_NUMBERING.sub("", line).strip().strip('"').strip("'")
+        if line and len(line) > 5:
+            queries.append(line)
+    return queries[:max_queries]
 
 
 class SearchEngine:
@@ -161,3 +193,98 @@ class SearchEngine:
             return expanded
         except Exception:
             return chunk
+
+    def search_multi_hop(
+        self,
+        query: str,
+        provider,
+        n_results: int = 5,
+        topic: str | None = None,
+        subtopic: str | None = None,
+    ) -> list[dict]:
+        """Multi-hop search: decompose → search each sub-query → combine → rerank.
+
+        Uses the LLM provider to break complex queries into sub-queries,
+        runs separate search passes, then deduplicates and reranks against
+        the original query. Falls back to single-hop if provider is unavailable
+        or decomposition fails.
+
+        Args:
+            query: The user's original question.
+            provider: An LLM provider with a chat() method, or None.
+            n_results: Number of final results to return.
+            topic: Optional topic filter.
+            subtopic: Optional subtopic filter.
+
+        Returns:
+            Same format as search() — list of chunk dicts with metadata.
+        """
+        cfg = self._cfg
+        max_queries = cfg.get("search.multi_hop_max_queries", 4)
+        threshold = cfg.get("search.multi_hop_relevance_threshold", 0.1)
+
+        # --- Decompose query into sub-queries ---
+        if provider is None:
+            return self.search(query, n_results, topic, subtopic)
+
+        try:
+            prompt = _DECOMPOSE_PROMPT.format(max_queries=max_queries, query=query)
+            raw = provider.chat([{"role": "user", "content": prompt}])
+            sub_queries = _parse_sub_queries(raw, max_queries)
+        except Exception:
+            return self.search(query, n_results, topic, subtopic)
+
+        if len(sub_queries) <= 1:
+            # Simple query — single-hop is sufficient
+            return self.search(query, n_results, topic, subtopic)
+
+        print(f"  Multi-hop: decomposed into {len(sub_queries)} sub-queries")
+        for i, sq in enumerate(sub_queries, 1):
+            print(f"    {i}. {sq}")
+
+        # --- Search each sub-query ---
+        # Use the full pipeline (vector + FTS + RRF + rerank) per sub-query
+        # but request more results to have a bigger candidate pool
+        per_query_n = max(n_results, 5)
+        all_ranked_ids: list[list[str]] = []
+        all_by_id: dict[str, dict] = {}
+
+        for sq in sub_queries:
+            results = self.search(sq, n_results=per_query_n, topic=topic, subtopic=subtopic)
+            ranked_ids = []
+            for r in results:
+                rid = r["id"]
+                ranked_ids.append(rid)
+                if rid not in all_by_id:
+                    all_by_id[rid] = r
+            all_ranked_ids.append(ranked_ids)
+
+        if not all_by_id:
+            return self.search(query, n_results, topic, subtopic)
+
+        # --- Combine via RRF across sub-query rankings ---
+        rrf_k = cfg.get("search.rrf_k", 60)
+        rrf_scores = _rrf(all_ranked_ids, k=rrf_k)
+
+        candidates = sorted(
+            all_by_id.values(),
+            key=lambda r: rrf_scores.get(r["id"], 0),
+            reverse=True,
+        )[:n_results * 4]
+
+        # --- Final rerank against the ORIGINAL query with scoring ---
+        scored = _rerank_with_scores(query, candidates, n_results * 2)
+
+        # --- Prune below relevance threshold ---
+        results = [c for c, score in scored if score >= threshold]
+        results = results[:n_results]
+
+        if not results:
+            # Threshold too aggressive — return top results anyway
+            results = [c for c, _ in scored[:n_results]]
+
+        # --- Parent-expand survivors ---
+        results = [self._expand_to_parent(r) for r in results]
+
+        print(f"  Multi-hop: {len(results)} results from {len(all_by_id)} candidates")
+        return results
