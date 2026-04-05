@@ -137,6 +137,7 @@ class CodexProvider(Provider):
             raise RuntimeError("Codex CLI not found")
 
         prompt = self._build_prompt(messages)
+        print(f"  [codex] stream starting")
 
         proc = subprocess.Popen(
             [binary, "exec", "-", "--json", "--full-auto", "--ephemeral"],
@@ -146,6 +147,7 @@ class CodexProvider(Provider):
         proc.stdin.write(prompt)
         proc.stdin.close()
 
+        yielded = 0
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -157,8 +159,18 @@ class CodexProvider(Provider):
                     if item.get("type") == "agent_message":
                         text = item.get("text", "")
                         if text:
+                            yielded += 1
                             yield text
             except json.JSONDecodeError:
                 continue
+
+        proc.wait()
+        if proc.returncode != 0:
+            stderr = proc.stderr.read(500) if proc.stderr else ""
+            print(f"  [codex] stream exit={proc.returncode} stderr={stderr!r}")
+            if yielded == 0:
+                raise RuntimeError(f"Codex stream failed (exit {proc.returncode}): {stderr[:200]}")
+        else:
+            print(f"  [codex] stream done, {yielded} chunks")
 
         proc.wait()

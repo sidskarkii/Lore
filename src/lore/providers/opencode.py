@@ -135,15 +135,16 @@ class OpenCodeProvider(Provider):
         cfg = get_config()
         model = model or cfg.get("provider.opencode.model", "opencode/minimax-m2.5-free")
         prompt = self._build_prompt(messages)
-
         clean_prompt = prompt.replace("\r\n", " ").replace("\n", " ")
 
+        print(f"  [opencode] stream model={model}")
         proc = subprocess.Popen(
             [binary, "run", clean_prompt, "-m", model, "--format", "json"],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
         )
 
+        yielded = 0
         for line in proc.stdout:
             line = line.strip()
             if not line:
@@ -153,8 +154,16 @@ class OpenCodeProvider(Provider):
                 if event.get("type") == "text":
                     text = event.get("part", {}).get("text", "")
                     if text:
+                        yielded += 1
                         yield text
             except json.JSONDecodeError:
                 continue
 
         proc.wait()
+        if proc.returncode != 0:
+            stderr = proc.stderr.read(500) if proc.stderr else ""
+            print(f"  [opencode] stream exit={proc.returncode} stderr={stderr!r}")
+            if yielded == 0:
+                raise RuntimeError(f"OpenCode stream failed (exit {proc.returncode}): {stderr[:200]}")
+        else:
+            print(f"  [opencode] stream done, {yielded} chunks")

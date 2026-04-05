@@ -306,9 +306,11 @@ async def chat_stream_sse(req: ChatRequest):
             break
 
     async def event_generator():
+        t0 = time.time()
         try:
             # Search
             engine = SearchEngine()
+            print(f"  [chat/sse] query: {last_user_msg[:80]!r}")
             if req.multi_hop:
                 yield {"event": "status", "data": "Decomposing query into sub-queries..."}
                 try:
@@ -320,6 +322,9 @@ async def chat_stream_sse(req: ChatRequest):
                     sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
             else:
                 sources = engine.search(last_user_msg, n_results=req.n_sources, topic=req.topic, subtopic=req.subtopic)
+
+            t1 = time.time()
+            print(f"  [chat/sse] search done: {(t1-t0)*1000:.0f}ms  ({len(sources)} sources)")
 
             # Send sources
             for s in sources:
@@ -345,15 +350,21 @@ async def chat_stream_sse(req: ChatRequest):
             # Stream LLM response
             rag_messages = _build_rag_messages(req.messages, sources)
             full_response = ""
+            first_token = True
             for chunk in provider.stream(rag_messages, model=req.model):
+                if first_token:
+                    print(f"  [chat/sse] first token: {(time.time()-t1)*1000:.0f}ms after search")
+                    first_token = False
                 full_response += chunk
                 yield {"event": "token", "data": chunk}
 
             # Persist
             db.add_message(session_id, "assistant", full_response, sources=_sources_for_db(sources))
             yield {"event": "done", "data": session_id}
+            print(f"  [chat/sse] TOTAL: {(time.time()-t0)*1000:.0f}ms")
 
         except Exception as e:
+            print(f"  [chat/sse] ERROR: {e}")
             yield {"event": "error", "data": str(e)}
 
     return EventSourceResponse(event_generator())

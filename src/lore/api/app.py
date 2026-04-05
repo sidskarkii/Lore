@@ -4,7 +4,7 @@ This is the entry point for the API server. It configures CORS
 (for the Tauri frontend), registers all routers, and sets up
 OpenAPI documentation.
 
-Run with: python -m tutorialvault.server
+Run with: python -m lore.server
 """
 
 from fastapi import FastAPI
@@ -33,11 +33,14 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[
-            "tauri://localhost",    # Tauri v2 webview origin
-            "http://localhost",     # Dev
-            "http://localhost:1420", # Vite dev server (Tauri default)
-            "http://localhost:5173", # Vite default
+            "tauri://localhost",
+            "http://localhost",
+            "http://localhost:1420",
+            "http://localhost:1421",
+            "http://localhost:1422",
+            "http://localhost:5173",
             "http://127.0.0.1:1420",
+            "http://127.0.0.1:1421",
         ],
         allow_credentials=True,
         allow_methods=["*"],

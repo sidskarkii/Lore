@@ -42,27 +42,11 @@ class CustomProvider(Provider):
         if not base_url:
             return ProviderStatus(installed=False, error="No base_url configured")
 
-        # Try to list models from the endpoint
-        models = []
-        authenticated = False
-        try:
-            from openai import OpenAI
-            client = OpenAI(base_url=base_url, api_key=api_key or "none")
-            model_list = client.models.list()
-            models = [
-                ProviderModel(id=m.id, name=m.id, context_window=0)
-                for m in model_list.data[:20]
-            ]
-            authenticated = True
-        except Exception:
-            # Endpoint might not support /models but still work for chat
-            if model:
-                models = [ProviderModel(id=model, name=model)]
-            authenticated = True  # Assume it works if configured
-
+        # Don't hit the API on status check — just report configured model
+        models = [ProviderModel(id=model, name=model)] if model else []
         return ProviderStatus(
             installed=True,
-            authenticated=authenticated,
+            authenticated=bool(api_key),
             version=base_url,
             models=models,
         )
@@ -72,32 +56,40 @@ class CustomProvider(Provider):
         base_url, api_key, _ = self._get_config()
         if not base_url:
             raise RuntimeError("Custom endpoint not configured. Set provider.custom.base_url in config.yaml")
-        return OpenAI(base_url=base_url, api_key=api_key or "none")
+        return OpenAI(base_url=base_url, api_key=api_key or "none", max_retries=0)
 
     def chat(self, messages: list[dict], model: str | None = None) -> str:
         client = self._get_client()
         _, _, default_model = self._get_config()
         model = model or default_model or "default"
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=1500,
-        )
-        return response.choices[0].message.content
+        print(f"  [custom] chat model={model}")
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=1500,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            print(f"  [custom] chat ERROR: {e}")
+            raise
 
     def stream(self, messages: list[dict], model: str | None = None) -> Iterator[str]:
         client = self._get_client()
         _, _, default_model = self._get_config()
         model = model or default_model or "default"
-
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=1500,
-            stream=True,
-        )
-        for chunk in response:
-            text = chunk.choices[0].delta.content or ""
-            if text:
-                yield text
+        print(f"  [custom] stream model={model}")
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=1500,
+                stream=True,
+            )
+            for chunk in response:
+                text = chunk.choices[0].delta.content or ""
+                if text:
+                    yield text
+        except Exception as e:
+            print(f"  [custom] stream ERROR: {e}")
+            raise

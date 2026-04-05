@@ -168,18 +168,26 @@ class KiloProvider(Provider):
             text=True, encoding="utf-8", errors="replace",
         )
 
+        yielded = 0
         for line in proc.stdout:
             cleaned = _strip_ansi(line).strip()
             if not cleaned or not cleaned.startswith('{'):
                 continue
             try:
                 event = json.loads(cleaned)
-                # Yield partial text events for streaming
                 if event.get("say") == "text":
                     content = event.get("content", "")
                     if content:
+                        yielded += 1
                         yield content
             except json.JSONDecodeError:
                 continue
 
         proc.wait()
+        if proc.returncode != 0:
+            stderr = proc.stderr.read(500) if proc.stderr else ""
+            print(f"  [kilo] stream exit={proc.returncode} stderr={stderr!r}")
+            if yielded == 0:
+                raise RuntimeError(f"Kilo stream failed (exit {proc.returncode}): {stderr[:200]}")
+        else:
+            print(f"  [kilo] stream done, {yielded} chunks")

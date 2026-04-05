@@ -1,5 +1,5 @@
 [project]
-name = "tutorialvault"
+name = "lore"
 version = "0.1.0"
 description = "Universal knowledge base — turn any video, doc, or playlist into a searchable, chat-ready library"
 requires-python = ">=3.10"
@@ -23,7 +23,7 @@ dependencies = [
 [project.optional-dependencies]
 # Full install with all features
 all = [
-    "tutorialvault[gpu,transcribe,local]",
+    "lore[gpu,transcribe,local]",
 ]
 # GPU-accelerated ONNX inference
 gpu = [
@@ -43,4 +43,4 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tutorialvault"]
+packages = ["src/lore"]

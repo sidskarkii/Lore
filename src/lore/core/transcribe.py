@@ -5,7 +5,7 @@ and timestamp-linked search results. Handles both audio and video files
 (extracts audio automatically via ffmpeg/av).
 
 Usage:
-    from tutorialvault.core.transcribe import Transcriber
+    from lore.core.transcribe import Transcriber
 
     t = Transcriber()
     segments = t.transcribe("video.mp4")

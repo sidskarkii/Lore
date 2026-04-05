@@ -70,7 +70,15 @@ class Config:
             with open(self._path, encoding="utf-8") as f:
                 file_cfg = yaml.safe_load(f) or {}
 
-        self._data = _deep_merge(_DEFAULTS, file_cfg)
+        # Merge config.local.yaml on top if present (gitignored, for secrets)
+        local_cfg = {}
+        if self._path:
+            local_path = self._path.parent / "config.local.yaml"
+            if local_path.exists():
+                with open(local_path, encoding="utf-8") as f:
+                    local_cfg = yaml.safe_load(f) or {}
+
+        self._data = _deep_merge(_deep_merge(_DEFAULTS, file_cfg), local_cfg)
 
     @staticmethod
     def _find_config() -> Path | None:

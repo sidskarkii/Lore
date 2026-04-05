@@ -7,7 +7,7 @@ Supports:
   - Pre-existing SRT/transcript files
 
 Usage:
-    from tutorialvault.core.ingest import Ingester
+    from lore.core.ingest import Ingester
 
     ingester = Ingester()
 
