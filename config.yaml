@@ -63,7 +63,7 @@ transcription:
 # --- Provider (LLM inference) ---
 provider:
   # Active provider: claude_code, opencode, codex, kilo, local_gguf, custom
-  active: kilo
+  active: opencode
   # Default model per provider (override in provider-specific config)
   claude_code:
     model: sonnet
