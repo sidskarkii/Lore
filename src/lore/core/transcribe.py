@@ -17,6 +17,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .config import get_config
@@ -141,7 +142,6 @@ class Transcriber:
 
         Use this to skip transcription when subtitles already exist.
         """
-        import re
 
         segments = []
         content = Path(path).read_text(encoding="utf-8")
@@ -176,7 +176,6 @@ class Transcriber:
 
         Expected format: [MM:SS - MM:SS] text
         """
-        import re
 
         segments = []
         for line in Path(path).read_text(encoding="utf-8").splitlines():

@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -75,7 +76,6 @@ SUB_EXTS = {".srt", ".vtt"}
 
 def _find_yt_dlp() -> str:
     """Find yt-dlp binary."""
-    import shutil
     path = shutil.which("yt-dlp")
     if path:
         return path
@@ -90,7 +90,6 @@ def _find_yt_dlp() -> str:
 
 def _find_ffmpeg() -> str | None:
     """Find ffmpeg binary (optional, for audio extraction)."""
-    import shutil
     path = shutil.which("ffmpeg")
     if path:
         return path

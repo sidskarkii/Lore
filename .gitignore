@@ -55,3 +55,19 @@ tests/test_output.*
 # UI
 ui/node_modules/
 ui/dist/
+
+# Tauri — Rust build artifacts + generated schemas
+ui/src-tauri/target/
+ui/src-tauri/gen/
+ui/src-tauri/Cargo.lock
+
+# Debug tools
+debug/sc.png
+
+# SQLite session database
+app.db
+app.db-shm
+app.db-wal
+
+# Old UI backup
+ui-svelte-old/

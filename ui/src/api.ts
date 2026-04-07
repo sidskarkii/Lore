@@ -40,11 +40,15 @@ export async function streamChat(
   const reader = res.body!.getReader()
   const decoder = new TextDecoder()
   let buf = ''
+  let doneFired = false
 
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
-    buf += decoder.decode(value, { stream: true })
+    const chunk = decoder.decode(value, { stream: true })
+    buf += chunk
+
+    if (buf.length < 500) console.log('[SSE raw]', JSON.stringify(buf))
 
     const parts = buf.split('\n\n')
     buf = parts.pop() ?? ''
@@ -61,24 +65,26 @@ export async function streamChat(
 
       if (!dataLine) continue
 
+      console.log('[SSE]', eventType, dataLine.slice(0, 30))
+
       try {
         const data = JSON.parse(dataLine)
-        if (eventType === 'source') {
-          // backend sends one source at a time — accumulate into array via callback
-          callbacks.onSource?.([data])
-        }
+        if (eventType === 'source') callbacks.onSource?.([data])
         else if (eventType === 'token') callbacks.onToken?.(typeof data === 'string' ? data : dataLine)
         else if (eventType === 'status') callbacks.onStatus?.(data)
         else if (eventType === 'session') callbacks.onSession?.(typeof data === 'string' ? data : String(data))
-        else if (eventType === 'done') callbacks.onDone?.()
+        else if (eventType === 'done') { doneFired = true; callbacks.onDone?.() }
         else if (eventType === 'error') callbacks.onError?.(typeof data === 'string' ? data : JSON.stringify(data))
       } catch {
         if (eventType === 'token') callbacks.onToken?.(dataLine)
+        else if (eventType === 'error') callbacks.onError?.(dataLine)
+        else if (eventType === 'session') callbacks.onSession?.(dataLine)
+        else if (eventType === 'done') { doneFired = true; callbacks.onDone?.() }
       }
     }
   }
 
-  callbacks.onDone?.()
+  if (!doneFired) callbacks.onDone?.()
 }
 
 // ── Sessions ──────────────────────────────────────────────────────────────────

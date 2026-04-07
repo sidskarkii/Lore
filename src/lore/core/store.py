@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import pandas as pd
 import pyarrow as pa
 
 from .chunk import fmt_timestamp
@@ -131,6 +132,9 @@ class Store:
         tbl.add(rows)
         self._rebuild_fts(tbl)
         self._optimize(tbl)
+        # Refresh table handle after optimize — it deletes old fragment files and
+        # the cached reference would point to stale paths on next access
+        self._table = self._db.open_table(self._table_name)
         return len(rows)
 
     def _rebuild_fts(self, tbl):
@@ -176,7 +180,10 @@ class Store:
         tbl = self._get_or_create_table()
         _cols = ["topic", "subtopic", "collection", "collection_display",
                  "episode_num", "episode_title"]
-        df = tbl.to_pandas()[_cols]
+        rows = tbl.search().limit(100_000).to_list()
+        if not rows:
+            return []
+        df = pd.DataFrame(rows)[_cols]
         if df.empty:
             return []
 

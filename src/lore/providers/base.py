@@ -7,6 +7,7 @@ they just call chat() and stream().
 
 from __future__ import annotations
 
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Iterator
@@ -81,7 +82,6 @@ class Provider(ABC):
         """Attempt to install this provider's CLI. Returns True on success."""
         if not self.install_command:
             return False
-        import subprocess
         try:
             result = subprocess.run(
                 self.install_command,
