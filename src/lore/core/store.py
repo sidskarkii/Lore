@@ -44,6 +44,17 @@ def _schema(dim: int) -> pa.Schema:
     ])
 
 
+_store_instance: "Store | None" = None
+
+
+def get_store() -> "Store":
+    """Return the process-wide Store singleton."""
+    global _store_instance
+    if _store_instance is None:
+        _store_instance = Store()
+    return _store_instance
+
+
 class Store:
     """LanceDB-backed vector store for tutorial chunks."""
 
@@ -56,11 +67,20 @@ class Store:
         self._db = lancedb.connect(str(db_path))
         self._table_name = cfg.get("store.table", "tutorials")
         self._dim = embed_dim()
+        self._table = None  # cached table handle — opened once, reused
 
     def _get_or_create_table(self):
-        if self._table_name in self._db.table_names():
-            return self._db.open_table(self._table_name)
-        return self._db.create_table(self._table_name, schema=_schema(self._dim))
+        if self._table is not None:
+            return self._table
+        if self._table_name in self._db.list_tables().tables:
+            self._table = self._db.open_table(self._table_name)
+        else:
+            self._table = self._db.create_table(self._table_name, schema=_schema(self._dim))
+        return self._table
+
+    def _invalidate_table_cache(self):
+        """Force re-open on next access — call after schema-changing ops."""
+        self._table = None
 
     # ── Write ─────────────────────────────────────────────────────────
 
@@ -154,10 +174,9 @@ class Store:
     def list_collections(self) -> list[dict]:
         """List all collections with episode counts."""
         tbl = self._get_or_create_table()
-        df = tbl.to_pandas()[
-            ["topic", "subtopic", "collection", "collection_display",
-             "episode_num", "episode_title"]
-        ]
+        _cols = ["topic", "subtopic", "collection", "collection_display",
+                 "episode_num", "episode_title"]
+        df = tbl.to_pandas()[_cols]
         if df.empty:
             return []
 
@@ -241,12 +260,15 @@ class Store:
             df = tbl.search().where(where).limit(200).to_pandas()
             return df.sort_values("start_sec").to_dict("records")
         except Exception:
-            # Fallback to full scan if search-based filtering fails
-            df = tbl.to_pandas()
-            mask = (
-                (df["collection"] == collection)
-                & (df["episode_num"] == episode_num)
-                & (df["start_sec"] >= start_sec)
-                & (df["start_sec"] <= end_sec)
-            )
-            return df[mask].sort_values("start_sec").to_dict("records")
+            # Fallback: full pandas scan (rare — only if WHERE search fails)
+            try:
+                df = tbl.to_pandas()
+                mask = (
+                    (df["collection"] == collection)
+                    & (df["episode_num"] == episode_num)
+                    & (df["start_sec"] >= start_sec)
+                    & (df["start_sec"] <= end_sec)
+                )
+                return df[mask].sort_values("start_sec").to_dict("records")
+            except Exception:
+                return []

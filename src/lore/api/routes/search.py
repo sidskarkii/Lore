@@ -3,7 +3,7 @@
 from fastapi import APIRouter, HTTPException
 
 from ..schemas import SearchRequest, SearchResponse, SearchResult
-from ...core.search import SearchEngine
+from ...core.search import get_search_engine
 
 router = APIRouter(tags=["search"])
 
@@ -19,7 +19,7 @@ router = APIRouter(tags=["search"])
 )
 def search(req: SearchRequest):
     try:
-        engine = SearchEngine()
+        engine = get_search_engine()
         results = engine.search(
             query=req.query,
             n_results=req.n_results,

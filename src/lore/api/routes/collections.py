@@ -8,7 +8,7 @@ from ..schemas import (
     EpisodeInfo,
     DeleteCollectionRequest,
 )
-from ...core.store import Store
+from ...core.store import get_store
 
 router = APIRouter(tags=["collections"])
 
@@ -23,7 +23,7 @@ router = APIRouter(tags=["collections"])
     ),
 )
 def list_collections():
-    store = Store()
+    store = get_store()
 
     try:
         collections = store.list_collections()
@@ -59,7 +59,7 @@ def list_collections():
     description="Removes all chunks for a collection from the knowledge base.",
 )
 def delete_collection(req: DeleteCollectionRequest):
-    store = Store()
+    store = get_store()
 
     try:
         store.delete_collection(req.collection)

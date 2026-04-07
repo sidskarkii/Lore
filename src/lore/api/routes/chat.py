@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from ..schemas import ChatRequest, ChatResponse, ChatMessage, SearchResult
 from ...core.database import get_database
-from ...core.search import SearchEngine
+from ...core.search import get_search_engine
 from ...providers.registry import get_registry
 
 
@@ -129,7 +129,7 @@ def chat(req: ChatRequest):
             break
 
     try:
-        engine = SearchEngine()
+        engine = get_search_engine()
         if req.multi_hop:
             try:
                 sources = engine.search_multi_hop(
@@ -214,7 +214,7 @@ async def chat_stream_ws(ws: WebSocket):
                 break
 
         try:
-            engine = SearchEngine()
+            engine = get_search_engine()
             if req.multi_hop:
                 await ws.send_text(json.dumps({"type": "status", "data": "Decomposing query into sub-queries..."}))
                 try:
@@ -309,7 +309,7 @@ async def chat_stream_sse(req: ChatRequest):
         t0 = time.time()
         try:
             # Search
-            engine = SearchEngine()
+            engine = get_search_engine()
             print(f"  [chat/sse] query: {last_user_msg[:80]!r}")
             if req.multi_hop:
                 yield {"event": "status", "data": "Decomposing query into sub-queries..."}

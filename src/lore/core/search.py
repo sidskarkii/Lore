@@ -8,9 +8,18 @@ import time
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_texts
-from .store import Store
+from .store import Store, get_store
 
 _ranker = None
+_engine_instance: "SearchEngine | None" = None
+
+
+def get_search_engine() -> "SearchEngine":
+    """Return the process-wide SearchEngine singleton."""
+    global _engine_instance
+    if _engine_instance is None:
+        _engine_instance = SearchEngine()
+    return _engine_instance
 
 
 def _get_ranker():
@@ -82,7 +91,7 @@ def _parse_sub_queries(text: str, max_queries: int) -> list[str]:
 
 class SearchEngine:
     def __init__(self, store: Store | None = None):
-        self.store = store or Store()
+        self.store = store or get_store()
         self._cfg = get_config()
 
     def search(

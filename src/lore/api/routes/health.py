@@ -4,7 +4,7 @@ from fastapi import APIRouter
 
 from ..schemas import HealthResponse
 from ...core.config import get_config
-from ...core.store import Store
+from ...core.store import get_store
 from ...providers.registry import get_registry
 
 router = APIRouter(tags=["health"])
@@ -22,7 +22,7 @@ def health():
     active = registry.active
 
     try:
-        total = Store().chunk_count()
+        total = get_store().chunk_count()
     except Exception:
         total = 0
 
