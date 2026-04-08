@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .chunk import chunk_segments
+from .chunk import chunk_segments, chunk_sections
 from .config import get_config
 from .store import Store
 from .transcribe import Transcriber
@@ -449,6 +449,156 @@ class Ingester:
             source_type="video",
             contextual=contextual,
         )
+
+    # ── Generic file / URL ingest ────────────────────────────────────
+
+    def ingest_file(
+        self,
+        path: str,
+        name: str,
+        topic: str = "",
+        subtopic: str = "",
+        source_type: str | None = None,
+        enrich: bool = True,
+        on_progress: ProgressCallback = None,
+    ) -> int:
+        """Ingest any supported file type — auto-detects format.
+
+        Supports PDF, EPUB, markdown, plain text, code, audio, video.
+        Returns total chunks stored.
+        """
+        from .extractors import extract, detect_source_type
+        from .enrich import enrich_programmatic
+
+        if source_type is None:
+            source_type = detect_source_type(path)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="extracting", progress=0.1, current_item=Path(path).name,
+                total_items=1, completed_items=0, message=f"Extracting {Path(path).name}...",
+            ))
+
+        doc = extract(path, source_type)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="chunking", progress=0.3, current_item=Path(path).name,
+                total_items=1, completed_items=0, message=f"Chunking {len(doc.sections)} sections...",
+            ))
+
+        chunks = chunk_sections(doc.sections, target_tokens=512, source_path=path)
+        if not chunks:
+            return 0
+
+        if enrich:
+            if on_progress:
+                on_progress(IngestionProgress(
+                    stage="enriching", progress=0.5, current_item=Path(path).name,
+                    total_items=1, completed_items=0, message="Extracting keywords and entities...",
+                ))
+            chunks = enrich_programmatic(chunks)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="embedding", progress=0.7, current_item=Path(path).name,
+                total_items=1, completed_items=0, message=f"Embedding {len(chunks)} chunks...",
+            ))
+
+        collection = _sanitize(name)
+        meta = {
+            "collection": collection,
+            "collection_display": name,
+            "topic": topic.lower() if topic else "",
+            "subtopic": subtopic.lower() if subtopic else "",
+            "episode_num": 1,
+            "episode_title": doc.metadata.get("book_title", doc.metadata.get("page_title", Path(path).stem)),
+            "url": doc.metadata.get("url", ""),
+            "source_type": doc.source_type,
+            "file_path": path,
+        }
+
+        n = self.store.add_chunks(chunks, meta)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="done", progress=1.0, current_item=Path(path).name,
+                total_items=1, completed_items=1, message=f"Done — {n} chunks indexed",
+            ))
+
+        return n
+
+    def ingest_url(
+        self,
+        url: str,
+        name: str,
+        topic: str = "",
+        subtopic: str = "",
+        enrich: bool = True,
+        on_progress: ProgressCallback = None,
+    ) -> int:
+        """Ingest a web page URL.
+
+        Uses trafilatura to extract content, then chunks and stores.
+        Returns total chunks stored.
+        """
+        from .extractors import extract_url
+        from .enrich import enrich_programmatic
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="extracting", progress=0.1, current_item=url,
+                total_items=1, completed_items=0, message=f"Fetching {url}...",
+            ))
+
+        doc = extract_url(url)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="chunking", progress=0.3, current_item=url,
+                total_items=1, completed_items=0, message=f"Chunking {len(doc.sections)} sections...",
+            ))
+
+        chunks = chunk_sections(doc.sections, target_tokens=512, source_path=url)
+        if not chunks:
+            return 0
+
+        if enrich:
+            if on_progress:
+                on_progress(IngestionProgress(
+                    stage="enriching", progress=0.5, current_item=url,
+                    total_items=1, completed_items=0, message="Extracting keywords and entities...",
+                ))
+            chunks = enrich_programmatic(chunks)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="embedding", progress=0.7, current_item=url,
+                total_items=1, completed_items=0, message=f"Embedding {len(chunks)} chunks...",
+            ))
+
+        collection = _sanitize(name)
+        meta = {
+            "collection": collection,
+            "collection_display": name,
+            "topic": topic.lower() if topic else "",
+            "subtopic": subtopic.lower() if subtopic else "",
+            "episode_num": 1,
+            "episode_title": doc.metadata.get("page_title", url),
+            "url": url,
+            "source_type": "web",
+            "file_path": url,
+        }
+
+        n = self.store.add_chunks(chunks, meta)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="done", progress=1.0, current_item=url,
+                total_items=1, completed_items=1, message=f"Done — {n} chunks indexed",
+            ))
+
+        return n
 
     # ── Internal ──────────────────────────────────────────────────────
 

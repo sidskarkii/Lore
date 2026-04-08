@@ -35,6 +35,25 @@ class IngestDocumentsRequest(BaseModel):
     contextual: bool = Field(False, description="Generate contextual prefixes")
 
 
+class IngestFileRequest(BaseModel):
+    """Ingest any supported file type (auto-detects format)."""
+    path: str = Field(..., description="Path to file")
+    name: str = Field(..., description="Collection display name")
+    topic: str = Field("", description="Topic category")
+    subtopic: str = Field("", description="Subtopic")
+    source_type: str | None = Field(None, description="Override auto-detection (pdf, epub, text, code, audio)")
+    enrich: bool = Field(True, description="Run keyword + entity extraction")
+
+
+class IngestUrlRequest(BaseModel):
+    """Ingest a web page URL."""
+    url: str = Field(..., description="Web page URL to ingest")
+    name: str = Field(..., description="Collection display name")
+    topic: str = Field("", description="Topic category")
+    subtopic: str = Field("", description="Subtopic")
+    enrich: bool = Field(True, description="Run keyword + entity extraction")
+
+
 class IngestResponse(BaseModel):
     """Result of an ingestion job."""
     success: bool
@@ -94,6 +113,44 @@ def ingest_documents(req: IngestDocumentsRequest):
         chunks = ingester.ingest_documents(
             path=req.path, name=req.name, topic=req.topic,
             subtopic=req.subtopic, contextual=req.contextual,
+        )
+        return IngestResponse(success=True, chunks=chunks, message=f"Ingested {chunks} chunks")
+    except Exception as e:
+        return IngestResponse(success=False, error=str(e))
+
+
+@router.post(
+    "/api/ingest/file",
+    response_model=IngestResponse,
+    summary="Ingest any file (auto-detects type)",
+    description="Supports PDF, EPUB, markdown, text, code, audio, video. Auto-detects format from extension.",
+)
+def ingest_file(req: IngestFileRequest):
+    from ...core.ingest import Ingester
+    try:
+        ingester = Ingester()
+        chunks = ingester.ingest_file(
+            path=req.path, name=req.name, topic=req.topic,
+            subtopic=req.subtopic, source_type=req.source_type, enrich=req.enrich,
+        )
+        return IngestResponse(success=True, chunks=chunks, message=f"Ingested {chunks} chunks")
+    except Exception as e:
+        return IngestResponse(success=False, error=str(e))
+
+
+@router.post(
+    "/api/ingest/url",
+    response_model=IngestResponse,
+    summary="Ingest a web page",
+    description="Fetches URL, extracts content, chunks, enriches, and stores.",
+)
+def ingest_url(req: IngestUrlRequest):
+    from ...core.ingest import Ingester
+    try:
+        ingester = Ingester()
+        chunks = ingester.ingest_url(
+            url=req.url, name=req.name, topic=req.topic,
+            subtopic=req.subtopic, enrich=req.enrich,
         )
         return IngestResponse(success=True, chunks=chunks, message=f"Ingested {chunks} chunks")
     except Exception as e:
