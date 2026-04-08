@@ -38,7 +38,7 @@ from typing import Callable
 
 from .chunk import chunk_segments, chunk_sections
 from .config import get_config
-from .store import Store
+from .store import Store, get_store
 from .transcribe import Transcriber
 
 
@@ -105,7 +105,7 @@ class Ingester:
     """Orchestrates the full ingestion pipeline."""
 
     def __init__(self, store: Store | None = None):
-        self.store = store or Store()
+        self.store = store or get_store()
         self.transcriber = Transcriber()
         self._cfg = get_config()
 
