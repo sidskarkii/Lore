@@ -158,7 +158,27 @@
   gap: 5px;
 }
 
+.col-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .col-name { font-size: 12px; color: #ddd; font-weight: 500; }
+
+.col-del-btn {
+  background: none;
+  border: none;
+  color: #555;
+  padding: 2px 3px;
+  cursor: pointer;
+  border-radius: 3px;
+  display: flex;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+.collection-item:hover .col-del-btn { opacity: 1; }
+.col-del-btn:hover { color: #e05a5a; }
 
 .col-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
 

@@ -159,6 +159,36 @@ export async function ingestYouTube(payload: {
   return r.json()
 }
 
+export async function ingestFile(payload: {
+  path: string; name: string; topic: string; subtopic: string; source_type?: string
+}) {
+  const r = await fetch(`${BASE}/api/ingest/file`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return r.json()
+}
+
+export async function ingestUrl(payload: {
+  url: string; name: string; topic: string; subtopic: string
+}) {
+  const r = await fetch(`${BASE}/api/ingest/url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return r.json()
+}
+
+export async function deleteCollection(collection: string): Promise<void> {
+  await fetch(`${BASE}/api/collections`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ collection }),
+  })
+}
+
 // ── Health ────────────────────────────────────────────────────────────────────
 
 export async function getHealth() {

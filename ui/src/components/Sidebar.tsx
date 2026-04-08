@@ -1,7 +1,6 @@
 import { useEffect } from 'react'
 import { useStore } from '../store'
 import { getSessions, deleteSession, getCollections, getProviders } from '../api'
-import { IngestPanel } from './IngestPanel'
 import './Sidebar.css'
 
 function formatDate(iso: string) {
@@ -16,7 +15,6 @@ function formatDate(iso: string) {
 export function Sidebar() {
   const sessions = useStore(s => s.sessions)
   const activeSessionId = useStore(s => s.activeSessionId)
-  const collections = useStore(s => s.collections)
   const providers = useStore(s => s.providers)
   const activeProvider = useStore(s => s.activeProvider)
   const sidebarView = useStore(s => s.sidebarView)
@@ -82,73 +80,43 @@ export function Sidebar() {
       </div>
 
       <div className="content">
-        {sidebarView === 'chat' && (
-          <>
-            <button className="new-chat-btn" onClick={newChat}>
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
-                <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
-              </svg>
-              New chat
-            </button>
+        <button className="new-chat-btn" onClick={newChat}>
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+            <path d="M6 1v10M1 6h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"/>
+          </svg>
+          New chat
+        </button>
 
-            {sessions.length > 0 ? (
-              <>
-                <div className="section-label">Recent</div>
-                <div className="session-list">
-                  {sessions.map(session => (
-                    <div
-                      key={session.id}
-                      className={`session-item ${activeSessionId === session.id ? 'active' : ''}`}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => { setActiveSessionId(session.id); setSidebarView('chat') }}
-                      onKeyDown={e => e.key === 'Enter' && setActiveSessionId(session.id)}
+        {sessions.length > 0 && (
+          <>
+            <div className="section-label">Recent</div>
+            <div className="session-list">
+              {sessions.map(session => (
+                <div
+                  key={session.id}
+                  className={`session-item ${activeSessionId === session.id && sidebarView === 'chat' ? 'active' : ''}`}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => { setActiveSessionId(session.id); setSidebarView('chat') }}
+                  onKeyDown={e => e.key === 'Enter' && setActiveSessionId(session.id)}
+                >
+                  <span className="session-title">{session.title}</span>
+                  <div className="session-meta">
+                    <span className="session-date">{formatDate(session.updated_at)}</span>
+                    <button
+                      className="del-btn"
+                      onClick={e => removeSession(session.id, e)}
+                      title="Delete"
+                      aria-label="Delete session"
                     >
-                      <span className="session-title">{session.title}</span>
-                      <div className="session-meta">
-                        <span className="session-date">{formatDate(session.updated_at)}</span>
-                        <button
-                          className="del-btn"
-                          onClick={e => removeSession(session.id, e)}
-                          title="Delete"
-                          aria-label="Delete session"
-                        >
-                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                            <path d="M1 1l8 8M9 1L1 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
-                          </svg>
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </>
-            ) : (
-              <p className="empty-hint">No conversations yet.</p>
-            )}
-          </>
-        )}
-
-        {sidebarView === 'ingest' && <IngestPanel />}
-
-        {sidebarView === 'library' && (
-          <>
-            <div className="section-label" style={{ padding: '12px 16px 6px' }}>Collections</div>
-            {collections.length > 0 ? (
-              <div className="collection-list">
-                {collections.map(col => (
-                  <div key={col.collection} className="collection-item">
-                    <div className="col-name">{col.collection_display}</div>
-                    <div className="col-meta">
-                      <span className="col-tag">{col.topic}</span>
-                      {col.subtopic && <span className="col-tag">{col.subtopic}</span>}
-                      <span className="col-count">{col.episode_count} ep</span>
-                    </div>
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M1 1l8 8M9 1L1 9" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round"/>
+                      </svg>
+                    </button>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="empty-hint">No content indexed yet.</p>
-            )}
+                </div>
+              ))}
+            </div>
           </>
         )}
       </div>

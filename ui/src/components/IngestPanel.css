@@ -75,6 +75,12 @@
   gap: 8px;
 }
 
+.hint {
+  font-size: 10px;
+  color: #555;
+  padding: 2px 4px;
+}
+
 .submit-btn {
   background: #7c6ef7;
   border: none;
