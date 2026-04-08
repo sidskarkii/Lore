@@ -71,3 +71,4 @@ app.db-wal
 
 # Old UI backup
 ui-svelte-old/
+test_docs
