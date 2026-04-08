@@ -1,6 +1,7 @@
-"""Chunking — group transcript segments into overlapping time windows."""
+"""Chunking — group segments and text into overlapping windows."""
 
 from __future__ import annotations
+import math
 
 from .config import get_config
 
@@ -60,6 +61,123 @@ def chunk_segments(
             "start_sec": buf_start,
             "end_sec": buf_segs[-1]["end"],
         })
+
+    return chunks
+
+
+def chunk_text(
+    text: str,
+    target_tokens: int = 512,
+    overlap_tokens: int = 0,
+    source_path: str = "",
+) -> list[dict]:
+    """Chunk plain text into segments using recursive word-based splitting.
+
+    Approximates tokens as ``words / 0.75`` (≈1.33 tokens per word).
+
+    Returns list of ``{"text": str, "start_sec": 0, "end_sec": 0,
+    "file_path": str}`` — ``start_sec``/``end_sec`` are always 0 because
+    plain-text sources have no timestamps.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    words = text.split()
+    target_words = max(1, int(target_tokens * 0.75))
+    overlap_words = max(0, int(overlap_tokens * 0.75))
+
+    # Fits in one chunk — return as-is.
+    if len(words) <= target_words:
+        return [{"text": text, "start_sec": 0, "end_sec": 0,
+                 "file_path": source_path}]
+
+    chunks: list[dict] = []
+    start = 0
+    while start < len(words):
+        end = min(start + target_words, len(words))
+        chunk_words = words[start:end]
+        chunks.append({
+            "text": " ".join(chunk_words),
+            "start_sec": 0,
+            "end_sec": 0,
+            "file_path": source_path,
+        })
+        step = target_words - overlap_words
+        start += max(1, step)
+
+    return chunks
+
+
+def chunk_sections(
+    sections: list[dict],
+    target_tokens: int = 512,
+    source_path: str = "",
+) -> list[dict]:
+    """Chunk pre-split sections from extractors.
+
+    *Input*: ``[{"title": "Section Name", "text": "section content…"}, …]``
+
+    Behaviour:
+    - Empty sections (no text after stripping) are dropped.
+    - Sections shorter than ``target_tokens / 3`` are merged with subsequent
+      sections to avoid tiny fragments.
+    - Sections exceeding *target_tokens* are split via :func:`chunk_text`.
+    - Each section's title (when present) is prepended to its text.
+    """
+    target_words = max(1, int(target_tokens * 0.75))
+    merge_threshold = target_words // 3
+
+    # ---- 1. Normalise: prepend title, drop empties -------------------------
+    prepared: list[str] = []
+    for sec in sections:
+        body = (sec.get("text") or "").strip()
+        title = (sec.get("title") or "").strip()
+        if not body and not title:
+            continue
+        if not body:
+            # Title-only section — skip (no real content).
+            continue
+        block = f"{title}\n{body}" if title else body
+        prepared.append(block)
+
+    if not prepared:
+        return []
+
+    # ---- 2. Merge tiny consecutive blocks -----------------------------------
+    merged: list[str] = []
+    buf = ""
+    for block in prepared:
+        if buf:
+            combined = f"{buf}\n{block}"
+            if len(buf.split()) < merge_threshold:
+                buf = combined
+                continue
+            else:
+                merged.append(buf)
+                buf = block
+        else:
+            buf = block
+    if buf:
+        merged.append(buf)
+
+    # ---- 3. Split oversized blocks, emit chunks -----------------------------
+    chunks: list[dict] = []
+    for block in merged:
+        word_count = len(block.split())
+        if word_count <= target_words:
+            chunks.append({
+                "text": block,
+                "start_sec": 0,
+                "end_sec": 0,
+                "file_path": source_path,
+            })
+        else:
+            chunks.extend(chunk_text(
+                block,
+                target_tokens=target_tokens,
+                source_path=source_path,
+            ))
 
     return chunks
 
