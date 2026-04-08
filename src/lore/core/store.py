@@ -42,6 +42,14 @@ def _schema(dim: int) -> pa.Schema:
         pa.field("start_sec",        pa.int32()),
         pa.field("end_sec",          pa.int32()),
         pa.field("timestamp",        pa.string()),
+        pa.field("title",            pa.string()),   # 3-8 word chunk title
+        pa.field("summary",          pa.string()),   # 1-2 sentence summary
+        pa.field("keywords",         pa.string()),   # comma-separated keywords
+        pa.field("entities",         pa.string()),   # JSON: [{"name":"X","type":"PERSON"},...]
+        pa.field("questions",        pa.string()),   # JSON: ["question1","question2",...]
+        pa.field("semantic_key",     pa.string()),   # 2-5 word subtopic identifier
+        pa.field("language",         pa.string()),   # detected language code
+        pa.field("file_path",        pa.string()),   # original source file path
     ])
 
 
@@ -74,7 +82,13 @@ class Store:
         if self._table is not None:
             return self._table
         if self._table_name in self._db.list_tables().tables:
-            self._table = self._db.open_table(self._table_name)
+            tbl = self._db.open_table(self._table_name)
+            existing_cols = {f.name for f in tbl.schema}
+            required_cols = {f.name for f in _schema(self._dim)}
+            if not required_cols.issubset(existing_cols):
+                self._db.drop_table(self._table_name)
+                tbl = self._db.create_table(self._table_name, schema=_schema(self._dim))
+            self._table = tbl
         else:
             self._table = self._db.create_table(self._table_name, schema=_schema(self._dim))
         return self._table
@@ -118,6 +132,14 @@ class Store:
                 "start_sec":          int(chunk["start_sec"]),
                 "end_sec":            int(chunk["end_sec"]),
                 "timestamp":          fmt_timestamp(chunk["start_sec"]),
+                "title":              chunk.get("title", ""),
+                "summary":            chunk.get("summary", ""),
+                "keywords":           chunk.get("keywords", ""),
+                "entities":           chunk.get("entities", ""),
+                "questions":          chunk.get("questions", ""),
+                "semantic_key":       chunk.get("semantic_key", ""),
+                "language":           chunk.get("language", ""),
+                "file_path":          chunk.get("file_path", meta.get("file_path", "")),
             })
 
         # Remove old chunks for this episode before re-adding
