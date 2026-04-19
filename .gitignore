@@ -71,4 +71,10 @@ app.db-wal
 
 # Old UI backup
 ui-svelte-old/
-test_docs.playwright-cli/
+
+# Test data and debug tools
+test_docs/
+.playwright-cli/
+.playwright/
+.pytest_cache/
+debug/
