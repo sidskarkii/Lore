@@ -124,60 +124,69 @@ def chunk_sections(
       sections to avoid tiny fragments.
     - Sections exceeding *target_tokens* are split via :func:`chunk_text`.
     - Each section's title (when present) is prepended to its text.
+    - Section titles are preserved as ``section_heading`` in chunk metadata.
     """
     target_words = max(1, int(target_tokens * 0.75))
     merge_threshold = target_words // 3
 
-    # ---- 1. Normalise: prepend title, drop empties -------------------------
-    prepared: list[str] = []
+    prepared: list[tuple[str, str]] = []
     for sec in sections:
         body = (sec.get("text") or "").strip()
         title = (sec.get("title") or "").strip()
-        if not body and not title:
-            continue
+        page_num = sec.get("page_num", 0)
+        chapter = sec.get("chapter", "")
         if not body:
-            # Title-only section — skip (no real content).
             continue
         block = f"{title}\n{body}" if title else body
-        prepared.append(block)
+        prepared.append((block, title, page_num, chapter))
 
     if not prepared:
         return []
 
-    # ---- 2. Merge tiny consecutive blocks -----------------------------------
-    merged: list[str] = []
-    buf = ""
-    for block in prepared:
-        if buf:
-            combined = f"{buf}\n{block}"
-            if len(buf.split()) < merge_threshold:
-                buf = combined
+    merged: list[tuple[str, str, int, str]] = []
+    buf_text = ""
+    buf_heading = ""
+    buf_page = 0
+    buf_chapter = ""
+    for block, heading, page_num, chapter in prepared:
+        if buf_text:
+            if len(buf_text.split()) < merge_threshold:
+                buf_text = f"{buf_text}\n{block}"
                 continue
             else:
-                merged.append(buf)
-                buf = block
+                merged.append((buf_text, buf_heading, buf_page, buf_chapter))
+                buf_text = block
+                buf_heading = heading
+                buf_page = page_num
+                buf_chapter = chapter
         else:
-            buf = block
-    if buf:
-        merged.append(buf)
+            buf_text = block
+            buf_heading = heading
+            buf_page = page_num
+            buf_chapter = chapter
+    if buf_text:
+        merged.append((buf_text, buf_heading, buf_page, buf_chapter))
 
-    # ---- 3. Split oversized blocks, emit chunks -----------------------------
     chunks: list[dict] = []
-    for block in merged:
+    for block, heading, page_num, chapter in merged:
+        base_meta = {
+            "start_sec": 0,
+            "end_sec": 0,
+            "file_path": source_path,
+            "section_heading": heading,
+            "page_num": page_num,
+            "chapter": chapter,
+        }
         word_count = len(block.split())
         if word_count <= target_words:
-            chunks.append({
-                "text": block,
-                "start_sec": 0,
-                "end_sec": 0,
-                "file_path": source_path,
-            })
+            chunks.append({"text": block, **base_meta})
         else:
-            chunks.extend(chunk_text(
-                block,
-                target_tokens=target_tokens,
-                source_path=source_path,
-            ))
+            sub_chunks = chunk_text(block, target_tokens=target_tokens, source_path=source_path)
+            for sc in sub_chunks:
+                sc["section_heading"] = heading
+                sc["page_num"] = page_num
+                sc["chapter"] = chapter
+            chunks.extend(sub_chunks)
 
     return chunks
 

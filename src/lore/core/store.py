@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import lancedb
 import pandas as pd
 import pyarrow as pa
 
@@ -31,25 +32,36 @@ def _schema(dim: int) -> pa.Schema:
         pa.field("id",               pa.string()),
         pa.field("text",             pa.string()),
         pa.field("vector",           pa.list_(pa.float32(), dim)),
-        pa.field("collection",       pa.string()),   # replaces "tutorial"
+        pa.field("collection",       pa.string()),
         pa.field("collection_display", pa.string()),
         pa.field("topic",            pa.string()),
         pa.field("subtopic",         pa.string()),
         pa.field("episode_num",      pa.int32()),
         pa.field("episode_title",    pa.string()),
         pa.field("url",              pa.string()),
-        pa.field("source_type",      pa.string()),   # "video", "docs", "qa"
+        pa.field("source_type",      pa.string()),
+        # temporal location (video/audio)
         pa.field("start_sec",        pa.int32()),
         pa.field("end_sec",          pa.int32()),
         pa.field("timestamp",        pa.string()),
-        pa.field("title",            pa.string()),   # 3-8 word chunk title
-        pa.field("summary",          pa.string()),   # 1-2 sentence summary
-        pa.field("keywords",         pa.string()),   # comma-separated keywords
-        pa.field("entities",         pa.string()),   # JSON: [{"name":"X","type":"PERSON"},...]
-        pa.field("questions",        pa.string()),   # JSON: ["question1","question2",...]
-        pa.field("semantic_key",     pa.string()),   # 2-5 word subtopic identifier
-        pa.field("language",         pa.string()),   # detected language code
-        pa.field("file_path",        pa.string()),   # original source file path
+        # document location (PDF, EPUB, text)
+        pa.field("page_num",         pa.int32()),
+        pa.field("section_heading",  pa.string()),
+        pa.field("chapter",          pa.string()),
+        # code location
+        pa.field("line_start",       pa.int32()),
+        pa.field("line_end",         pa.int32()),
+        # chunk index within episode (for document expansion)
+        pa.field("chunk_index",      pa.int32()),
+        # enrichment
+        pa.field("title",            pa.string()),
+        pa.field("summary",          pa.string()),
+        pa.field("keywords",         pa.string()),
+        pa.field("entities",         pa.string()),
+        pa.field("questions",        pa.string()),
+        pa.field("semantic_key",     pa.string()),
+        pa.field("language",         pa.string()),
+        pa.field("file_path",        pa.string()),
     ])
 
 
@@ -68,8 +80,6 @@ class Store:
     """LanceDB-backed vector store for tutorial chunks."""
 
     def __init__(self, db_path: str | Path | None = None):
-        import lancedb
-
         cfg = get_config()
         if db_path is None:
             db_path = cfg.resolve_path("store.path")
@@ -117,6 +127,7 @@ class Store:
         rows = []
         for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
             chunk_id = f"{meta['collection']}_ep{meta['episode_num']:03d}_{i:04d}"
+            start_sec = int(chunk.get("start_sec", 0))
             rows.append({
                 "id":                 chunk_id,
                 "text":               chunk["text"],
@@ -127,11 +138,17 @@ class Store:
                 "subtopic":           meta.get("subtopic", ""),
                 "episode_num":        int(meta["episode_num"]),
                 "episode_title":      meta.get("episode_title", ""),
-                "url":                _deep_link_url(meta.get("url", ""), int(chunk["start_sec"])),
+                "url":                _deep_link_url(meta.get("url", ""), start_sec),
                 "source_type":        meta.get("source_type", "video"),
-                "start_sec":          int(chunk["start_sec"]),
-                "end_sec":            int(chunk["end_sec"]),
-                "timestamp":          fmt_timestamp(chunk["start_sec"]),
+                "start_sec":          start_sec,
+                "end_sec":            int(chunk.get("end_sec", 0)),
+                "timestamp":          fmt_timestamp(start_sec) if start_sec > 0 else "",
+                "page_num":           int(chunk.get("page_num", 0)),
+                "section_heading":    chunk.get("section_heading", ""),
+                "chapter":            chunk.get("chapter", ""),
+                "line_start":         int(chunk.get("line_start", 0)),
+                "line_end":           int(chunk.get("line_end", 0)),
+                "chunk_index":        i,
                 "title":              chunk.get("title", ""),
                 "summary":            chunk.get("summary", ""),
                 "keywords":           chunk.get("keywords", ""),
@@ -235,6 +252,15 @@ class Store:
         tbl = self._get_or_create_table()
         return tbl.count_rows()
 
+    def get_chunk_by_id(self, chunk_id: str) -> dict | None:
+        """Look up a single chunk by its ID."""
+        tbl = self._get_or_create_table()
+        try:
+            results = tbl.search().where(f"id = '{chunk_id}'").limit(1).to_list()
+            return results[0] if results else None
+        except Exception:
+            return None
+
     # ── Search primitives ─────────────────────────────────────────────
 
     def vector_search(
@@ -301,3 +327,24 @@ class Store:
                 return df[mask].sort_values("start_sec").to_dict("records")
             except Exception:
                 return []
+
+    def get_neighbors_by_index(
+        self,
+        collection: str,
+        episode_num: int,
+        chunk_index_start: int,
+        chunk_index_end: int,
+    ) -> list[dict]:
+        """Get chunks by index range for document-style expansion."""
+        tbl = self._get_or_create_table()
+        where = (
+            f"collection = '{collection}' "
+            f"AND episode_num = {episode_num} "
+            f"AND chunk_index >= {chunk_index_start} "
+            f"AND chunk_index <= {chunk_index_end}"
+        )
+        try:
+            df = tbl.search().where(where).limit(200).to_pandas()
+            return df.sort_values("chunk_index").to_dict("records")
+        except Exception:
+            return []

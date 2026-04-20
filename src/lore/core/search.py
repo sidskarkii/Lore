@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 import time
 
+from flashrank import Ranker, RerankRequest
+
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_texts
@@ -32,7 +34,6 @@ def _get_ranker():
     if not model:
         return None
 
-    from flashrank import Ranker
     print(f"  Loading reranker {model}...")
     _ranker = Ranker(model_name=model)
     return _ranker
@@ -43,8 +44,7 @@ def _rerank_with_scores(query: str, candidates: list[dict], n: int) -> list[tupl
     if ranker is None:
         return [(c, 1.0) for c in candidates[:n]]
 
-    from flashrank import RerankRequest
-    passages = [{"id": str(i), "text": c["text"][:500]} for i, c in enumerate(candidates)]
+    passages = [{"id": str(i), "text": c["text"]} for i, c in enumerate(candidates)]
     reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
     return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
 
@@ -100,6 +100,7 @@ class SearchEngine:
         n_results: int = 5,
         topic: str | None = None,
         subtopic: str | None = None,
+        expand: bool = True,
     ) -> list[dict]:
         cfg = self._cfg
         candidate_count = cfg.get("search.candidate_count", 30)
@@ -147,7 +148,8 @@ class SearchEngine:
         print(f"  [search] rerank:       {(t5-t4)*1000:.0f}ms  ({len(results)} results)")
 
         # 6. Parent window expansion
-        results = [self._expand_to_parent(r) for r in results]
+        if expand:
+            results = [self._expand_to_parent(r) for r in results]
         t6 = time.perf_counter()
         print(f"  [search] expand:       {(t6-t5)*1000:.0f}ms")
         print(f"  [search] TOTAL:        {(t6-t0)*1000:.0f}ms")
@@ -155,6 +157,17 @@ class SearchEngine:
         return results
 
     def _expand_to_parent(self, chunk: dict) -> dict:
+        has_timestamps = int(chunk.get("start_sec", 0)) > 0 or int(chunk.get("end_sec", 0)) > 0
+        has_chunk_index = "chunk_index" in chunk
+
+        if has_timestamps:
+            return self._expand_temporal(chunk)
+        elif has_chunk_index:
+            return self._expand_by_index(chunk)
+        return chunk
+
+    def _expand_temporal(self, chunk: dict) -> dict:
+        """Expand using time window (video/audio sources)."""
         window = self._cfg.get("search.parent_window_sec", 150)
         try:
             center = int(chunk["start_sec"])
@@ -180,6 +193,26 @@ class SearchEngine:
             expanded["start_sec"] = int(neighbors[0]["start_sec"])
             expanded["end_sec"] = int(neighbors[-1]["end_sec"])
             expanded["timestamp"] = fmt_timestamp(neighbors[0]["start_sec"])
+            return expanded
+        except Exception:
+            return chunk
+
+    def _expand_by_index(self, chunk: dict) -> dict:
+        """Expand using chunk index (document/code sources)."""
+        try:
+            idx = int(chunk.get("chunk_index", 0))
+            neighbors = self.store.get_neighbors_by_index(
+                collection=chunk["collection"],
+                episode_num=chunk["episode_num"],
+                chunk_index_start=max(0, idx - 2),
+                chunk_index_end=idx + 2,
+            )
+            if not neighbors or len(neighbors) <= 1:
+                return chunk
+
+            parts = [row["text"] for row in neighbors]
+            expanded = dict(chunk)
+            expanded["text"] = "\n\n".join(parts)
             return expanded
         except Exception:
             return chunk
