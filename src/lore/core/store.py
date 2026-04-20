@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import timedelta
 from pathlib import Path
 
@@ -62,6 +63,7 @@ def _schema(dim: int) -> pa.Schema:
         pa.field("semantic_key",     pa.string()),
         pa.field("language",         pa.string()),
         pa.field("file_path",        pa.string()),
+        pa.field("content_hash",     pa.string()),
     ])
 
 
@@ -122,10 +124,25 @@ class Store:
             return 0
 
         tbl = self._get_or_create_table()
-        vectors = embed_texts([c["text"] for c in chunks])
+
+        for c in chunks:
+            c["_hash"] = hashlib.sha256(c["text"].encode()).hexdigest()[:16]
+
+        existing_hashes: set[str] = set()
+        try:
+            all_rows = tbl.search().select(["content_hash"]).limit(500_000).to_list()
+            existing_hashes = {r["content_hash"] for r in all_rows if r.get("content_hash")}
+        except Exception:
+            pass
+
+        new_chunks = [c for c in chunks if c["_hash"] not in existing_hashes]
+        if not new_chunks:
+            return 0
+
+        vectors = embed_texts([c["text"] for c in new_chunks])
 
         rows = []
-        for i, (chunk, vec) in enumerate(zip(chunks, vectors)):
+        for i, (chunk, vec) in enumerate(zip(new_chunks, vectors)):
             chunk_id = f"{meta['collection']}_ep{meta['episode_num']:03d}_{i:04d}"
             start_sec = int(chunk.get("start_sec", 0))
             rows.append({
@@ -157,6 +174,7 @@ class Store:
                 "semantic_key":       chunk.get("semantic_key", ""),
                 "language":           chunk.get("language", ""),
                 "file_path":          chunk.get("file_path", meta.get("file_path", "")),
+                "content_hash":       chunk["_hash"],
             })
 
         # Remove old chunks for this episode before re-adding

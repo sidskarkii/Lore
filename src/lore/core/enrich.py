@@ -6,10 +6,7 @@ import json
 
 
 def enrich_programmatic(chunks: list[dict]) -> list[dict]:
-    """Add keywords and entities to chunks without LLM calls.
-
-    Modifies chunks in-place and returns them.
-    """
+    """Add keywords and entities to chunks without LLM calls."""
     texts = [c["text"] for c in chunks]
 
     keywords_list = _extract_keywords_batch(texts)
@@ -76,32 +73,36 @@ def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
         return [[] for _ in texts]
 
 
-def enrich_llm(chunks: list[dict], provider) -> list[dict]:
-    """Add LLM-generated enrichment: title, summary, questions, semantic_key.
+_ENRICH_PROMPT = """Analyze these text chunks and return a JSON array with one object per chunk.
+Each object must have exactly these fields:
+- "title": Concise title (3-8 words)
+- "summary": 1-2 sentence summary
+- "tags": Array of 3-6 relevant tags (lowercase, no spaces, use hyphens)
+- "questions": Array of 2-3 natural questions this text answers
+- "semantic_key": 2-5 word subtopic identifier
 
-    Uses MDKeyChunker-style single-call extraction for efficiency.
-    Modifies chunks in-place and returns them.
+Return ONLY a valid JSON array, no other text.
+
+Chunks:
+{chunks}"""
+
+
+def enrich_llm(chunks: list[dict], provider, batch_size: int = 5) -> list[dict]:
+    """Add LLM-generated enrichment: title, summary, tags, questions, semantic_key.
+
+    Batches multiple chunks per LLM call for efficiency.
     """
-    prompt_template = """Analyze this text chunk and return a JSON object with exactly these fields:
-- "title": A concise title (3-8 words)
-- "summary": A 1-2 sentence summary of the key information
-- "questions": An array of 2-3 natural questions this text answers
-- "semantic_key": A 2-5 word subtopic identifier
+    enrichable = [(i, c) for i, c in enumerate(chunks) if len(c["text"].split()) >= 15]
 
-Text:
----
-{text}
----
+    for batch_start in range(0, len(enrichable), batch_size):
+        batch = enrichable[batch_start:batch_start + batch_size]
 
-Return ONLY valid JSON, no other text."""
-
-    for chunk in chunks:
-        text = chunk["text"]
-        if len(text.split()) < 15:
-            continue
+        chunks_text = ""
+        for idx, (_, chunk) in enumerate(batch):
+            chunks_text += f"\n--- Chunk {idx + 1} ---\n{chunk['text']}\n"
 
         try:
-            prompt = prompt_template.format(text=text)
+            prompt = _ENRICH_PROMPT.format(chunks=chunks_text)
             response = provider.chat(
                 [{"role": "user", "content": prompt}],
                 model=None,
@@ -113,13 +114,18 @@ Return ONLY valid JSON, no other text."""
                 if json_str.startswith("json"):
                     json_str = json_str[4:]
 
-            data = json.loads(json_str)
-            chunk["title"] = data.get("title", "")
-            chunk["summary"] = data.get("summary", "")
-            chunk["questions"] = json.dumps(data.get("questions", []))
-            chunk["semantic_key"] = data.get("semantic_key", "")
+            results = json.loads(json_str)
+            if not isinstance(results, list):
+                results = [results]
+
+            for (orig_idx, chunk), enrichment in zip(batch, results):
+                chunk["title"] = enrichment.get("title", "")
+                chunk["summary"] = enrichment.get("summary", "")
+                chunk["keywords"] = ", ".join(enrichment.get("tags", []))
+                chunk["questions"] = json.dumps(enrichment.get("questions", []))
+                chunk["semantic_key"] = enrichment.get("semantic_key", "")
+
         except Exception as e:
-            print(f"  LLM enrichment failed for chunk: {e}")
-            continue
+            print(f"  LLM enrichment failed for batch: {e}")
 
     return chunks
