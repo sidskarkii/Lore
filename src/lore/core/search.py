@@ -143,7 +143,12 @@ class SearchEngine:
         print(f"  [search] rrf:          {(t4-t3)*1000:.0f}ms  ({len(candidates)} candidates)")
 
         # 5. Rerank
-        results = _rerank(query, candidates, n_results)
+        scored = _rerank_with_scores(query, candidates, n_results)
+        results = []
+        for c, score in scored:
+            r = dict(c)
+            r["_score"] = round(score, 4)
+            results.append(r)
         t5 = time.perf_counter()
         print(f"  [search] rerank:       {(t5-t4)*1000:.0f}ms  ({len(results)} results)")
 
@@ -259,8 +264,12 @@ class SearchEngine:
         candidates = sorted(all_by_id.values(), key=lambda r: rrf_scores.get(r["id"], 0), reverse=True)[:n_results * 4]
 
         scored = _rerank_with_scores(query, candidates, n_results * 2)
-        results = [c for c, score in scored if score >= threshold] or [c for c, _ in scored[:n_results]]
-        results = results[:n_results]
+        filtered = [(c, s) for c, s in scored if s >= threshold] or scored[:n_results]
+        results = []
+        for c, score in filtered[:n_results]:
+            r = dict(c)
+            r["_score"] = round(score, 4)
+            results.append(r)
         results = [self._expand_to_parent(r) for r in results]
 
         print(f"  [multi-hop] {len(results)} final results from {len(all_by_id)} candidates")

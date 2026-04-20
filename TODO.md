@@ -3,10 +3,13 @@
 **Target:** macOS, Apple Silicon (M1+), 16GB+ RAM
 
 ## Context Engineering
-- [ ] Progressive disclosure in search: return compact results first (title, section, collection, chunk_id, token_count), agent fetches full text via get_context. Balance between useful-at-a-glance and not requiring extra tool calls for simple queries
 - [ ] Entity-boosted search: extract entities from query, match against stored entities, boost chunks with entity overlap as third RRF signal
-- [ ] Token count estimates in search results so agent knows context budget cost before fetching
 - [ ] System prompt rework for RAG harness
+
+## Source Structure & Navigation
+- [ ] Domain-specific chunk IDs and hierarchy: books use part/chapter/section (e.g. `pt01_ch03_s005`), videos keep episode/timestamp, code uses file/symbol. get_context understands the source's natural structure ("next chapter", "this part") instead of raw index offsets
+- [ ] Video chapter extraction: pull YouTube chapters from description metadata (yt-dlp), store as chapter field on video chunks so compact results show section names instead of bare timestamps
+- [ ] Auto-generated section labels: LLM enrichment detects topic shifts in videos without chapters, assigns section names during enrichment pass
 
 ## Search
 - [ ] Incremental FTS index updates instead of full rebuild on every ingest
@@ -28,13 +31,11 @@
 - [ ] Reference graph + PageRank (Aider approach)
 
 ## Extractors
-- [ ] Web: switch trafilatura to markdown output (done, needs broader testing)
 - [ ] PDF: tune heading detection heuristics (some figure captions picked up as headings)
 - [ ] PDF: fix code block fragmentation on blank lines within code
 
 ## Ingestion
 - [ ] Ingestion resume: track completed episodes so crashed ingests can resume
-- [ ] Consolidate remaining old ingest paths fully
 
 ## Enrichment
 - [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings)
@@ -48,6 +49,9 @@
 - [ ] MCP sampling for enrichment (use calling agent's LLM)
 
 ## Done
+- [x] Progressive disclosure: compact search results (metadata + scores + token_count, no text) with get_context for full fetch
+- [x] Token count estimates in search results
+- [x] Reranker scores passed through to MCP results
 - [x] Configurable host/port from config.yaml
 - [x] CORS regex instead of hardcoded origin list
 - [x] Chat route refactor: extracted shared helpers, dropped WebSocket endpoint

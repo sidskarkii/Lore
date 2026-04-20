@@ -31,9 +31,11 @@ def create_mcp_server() -> FastMCP:
         instructions=(
             "Lore is a local-first RAG knowledge base. It indexes videos, documents, "
             "code, and web pages into searchable chunks with timestamp-level precision. "
-            "Use 'search' for most queries. Use 'search_deep' for complex questions "
-            "spanning multiple topics. Use 'get_context' to read more around a result. "
-            "Use 'list_collections' to see what's indexed before searching."
+            "Use 'search' for most queries — results are compact by default (metadata "
+            "only, no full text). Scan the scores, summaries, and token_counts, then "
+            "call 'get_context' with chunk_id to fetch full text for the results you "
+            "actually need. Use 'search_deep' for complex questions spanning multiple "
+            "topics. Use 'list_collections' to see what's indexed before searching."
         ),
         stateless_http=True,
         json_response=True,
@@ -43,11 +45,39 @@ def create_mcp_server() -> FastMCP:
     return mcp
 
 
+def _estimate_tokens(text: str) -> int:
+    return len(text) // 4 if text else 0
+
+
+def _source_location(r: dict) -> dict:
+    """Return source-type-specific location fields."""
+    source_type = r.get("source_type", "")
+    if source_type in ("video", "audio"):
+        return {
+            "timestamp": r.get("timestamp", ""),
+            "start_sec": r.get("start_sec", 0),
+            "end_sec": r.get("end_sec", 0),
+        }
+    elif source_type == "code":
+        return {
+            "file_path": r.get("file_path", ""),
+            "line_start": r.get("line_start", 0),
+            "line_end": r.get("line_end", 0),
+        }
+    return {
+        "page_num": r.get("page_num", 0),
+        "section_heading": r.get("section_heading", ""),
+        "chapter": r.get("chapter", ""),
+    }
+
+
 def _format_result(r: dict) -> dict:
-    """Convert a raw search result dict to the MCP response format."""
+    """Convert a raw search result dict to the full MCP response format."""
     result = {
         "chunk_id": r.get("id", ""),
         "text": r.get("text", ""),
+        "score": r.get("_score", 0.0),
+        "token_count": _estimate_tokens(r.get("text", "")),
         "collection": r.get("collection", ""),
         "collection_display": r.get("collection_display", ""),
         "episode_num": r.get("episode_num", 0),
@@ -62,19 +92,25 @@ def _format_result(r: dict) -> dict:
         "entities": r.get("entities", ""),
         "semantic_key": r.get("semantic_key", ""),
     }
-    source_type = r.get("source_type", "")
-    if source_type in ("video", "audio"):
-        result["timestamp"] = r.get("timestamp", "")
-        result["start_sec"] = r.get("start_sec", 0)
-        result["end_sec"] = r.get("end_sec", 0)
-    elif source_type == "code":
-        result["file_path"] = r.get("file_path", "")
-        result["line_start"] = r.get("line_start", 0)
-        result["line_end"] = r.get("line_end", 0)
-    else:
-        result["page_num"] = r.get("page_num", 0)
-        result["section_heading"] = r.get("section_heading", "")
-        result["chapter"] = r.get("chapter", "")
+    result.update(_source_location(r))
+    return result
+
+
+def _format_compact_result(r: dict) -> dict:
+    """Metadata-only result for progressive disclosure. No full text."""
+    result = {
+        "chunk_id": r.get("id", ""),
+        "score": r.get("_score", 0.0),
+        "token_count": _estimate_tokens(r.get("text", "")),
+        "collection": r.get("collection", ""),
+        "collection_display": r.get("collection_display", ""),
+        "episode_title": r.get("episode_title", ""),
+        "source_type": r.get("source_type", ""),
+        "title": r.get("title", ""),
+        "summary": r.get("summary", ""),
+        "keywords": r.get("keywords", ""),
+    }
+    result.update(_source_location(r))
     return result
 
 
@@ -88,7 +124,8 @@ def _register_tools(mcp: FastMCP) -> None:
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
         topic: Annotated[str | None, Field(default=None, description="Filter by topic (e.g. '3d', 'ai', 'code'). Use list_collections to see available topics.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic (e.g. 'blender', 'houdini').")] = None,
-        expand: Annotated[bool, Field(default=False, description="If true, return parent-expanded context (surrounding chunks) for each result.")] = False,
+        compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only (title, summary, score, token_count, location) without full text. Set false to include full chunk text inline.")] = True,
+        expand: Annotated[bool, Field(default=False, description="If true, return parent-expanded context (surrounding chunks) for each result. Only applies when compact=false.")] = False,
     ) -> dict:
         """Search the Lore knowledge base using hybrid retrieval.
 
@@ -99,14 +136,15 @@ def _register_tools(mcp: FastMCP) -> None:
         queries, how-to questions, or locating specific content. For complex
         questions spanning multiple topics, use search_deep instead.
 
-        RETURNS: Dict with success, total count, and results list. Each result
-        contains text, chunk_id (pass to get_context for more), source metadata
-        (collection, episode, timestamp, URL), and enrichment data (title,
-        summary, keywords, entities, semantic_key).
+        RETURNS: By default returns compact results (no full text) with score,
+        token_count, title, summary, and location metadata. This lets you scan
+        results and decide which to fetch in full via get_context. Set
+        compact=false to include full chunk text inline (costs more context).
 
-        TIPS: Use list_collections first to discover available topics/subtopics
-        for filtering. Pass chunk_id from results to get_context to read more
-        around a promising result.
+        TIPS: Start with compact results (default). Check scores and summaries
+        to identify relevant hits, then call get_context with chunk_id to read
+        the full text of promising results. Use list_collections to discover
+        available topics/subtopics for filtering.
         """
         try:
             engine = get_search_engine()
@@ -115,13 +153,15 @@ def _register_tools(mcp: FastMCP) -> None:
                 n_results=n_results,
                 topic=topic,
                 subtopic=subtopic,
-                expand=expand,
+                expand=expand and not compact,
             )
+            formatter = _format_compact_result if compact else _format_result
             return {
                 "success": True,
                 "query": query,
                 "total": len(results),
-                "results": [_format_result(r) for r in results],
+                "compact": compact,
+                "results": [formatter(r) for r in results],
             }
         except Exception as e:
             return {"success": False, "error": str(e), "query": query, "total": 0, "results": []}
@@ -134,6 +174,7 @@ def _register_tools(mcp: FastMCP) -> None:
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
         topic: Annotated[str | None, Field(default=None, description="Filter by topic.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic.")] = None,
+        compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only without full text. Set false to include full chunk text.")] = True,
     ) -> dict:
         """Deep search using multi-hop query decomposition.
 
@@ -146,6 +187,9 @@ def _register_tools(mcp: FastMCP) -> None:
         Houdini handle fluid simulation" or "What are all the steps to set
         up a full render pipeline?" Falls back to regular search if no LLM
         provider is configured.
+
+        RETURNS: Same format as search. Compact by default (metadata only).
+        Set compact=false for full text inline.
 
         REQUIRES: An active LLM provider configured in Lore (e.g. OpenRouter
         via config.local.yaml). Without one, behaves identically to search.
@@ -162,11 +206,13 @@ def _register_tools(mcp: FastMCP) -> None:
                 topic=topic,
                 subtopic=subtopic,
             )
+            formatter = _format_compact_result if compact else _format_result
             return {
                 "success": True,
                 "query": query,
                 "total": len(results),
-                "results": [_format_result(r) for r in results],
+                "compact": compact,
+                "results": [formatter(r) for r in results],
             }
         except Exception as e:
             return {"success": False, "error": str(e), "query": query, "total": 0, "results": []}
