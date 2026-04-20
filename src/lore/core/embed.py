@@ -15,6 +15,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import onnxruntime as ort
+from huggingface_hub import hf_hub_download
+from tokenizers import Tokenizer
 
 from .config import get_config
 
@@ -32,8 +35,6 @@ _VARIANT_FILES = {
 
 def _download_model() -> Path:
     """Download ONNX model files from HuggingFace (only the selected variant)."""
-    from huggingface_hub import hf_hub_download, snapshot_download
-
     cfg = get_config()
     repo = cfg.get("embedding.model", "onnx-community/embeddinggemma-300m-ONNX")
     variant = cfg.get("embedding.variant", "q4")
@@ -58,9 +59,6 @@ def _get_session_and_tokenizer():
     global _session, _tokenizer
     if _session is not None:
         return _session, _tokenizer
-
-    import onnxruntime as ort
-    from tokenizers import Tokenizer
 
     cfg = get_config()
     device = cfg.embed_device

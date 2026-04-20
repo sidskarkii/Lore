@@ -9,6 +9,10 @@ from typing import Any
 import yaml
 
 _DEFAULTS = {
+    "server": {
+        "host": "127.0.0.1",
+        "port": 8000,
+    },
     "store": {
         "path": ".lancedb",
         "table": "tutorials",
@@ -40,11 +44,11 @@ _DEFAULTS = {
         "language": "en",
     },
     "provider": {
-        "active": "kilo",
+        "active": "custom",
     },
 }
 
-
+#recursively merges two dicts. If both sides have a nested dict for the same key, it recurses in. Otherwise the override wins.
 def _deep_merge(base: dict, override: dict) -> dict:
     """Merge override into base, recursing into nested dicts."""
     merged = dict(base)

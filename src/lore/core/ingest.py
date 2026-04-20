@@ -711,7 +711,7 @@ class Ingester:
                 "Write 1-2 sentences describing the specific concept or technique "
                 "covered in this transcript excerpt. Be concrete - mention tool names, "
                 "node names, or technical terms if present.\n\n"
-                f"Excerpt: {chunk['text'][:600]}\n\nContext description:"
+                f"Excerpt: {chunk['text']}\n\nContext description:"
             )
 
             try:

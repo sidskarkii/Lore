@@ -100,9 +100,6 @@ Return ONLY valid JSON, no other text."""
         if len(text.split()) < 15:
             continue
 
-        if len(text) > 3000:
-            text = text[:3000] + "..."
-
         try:
             prompt = prompt_template.format(text=text)
             response = provider.chat(
