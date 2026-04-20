@@ -79,24 +79,12 @@ def _find_yt_dlp() -> str:
     path = shutil.which("yt-dlp")
     if path:
         return path
-    # Check common locations
-    for candidate in [
-        r"H:\Houdini\whisperx-env2\Scripts\yt-dlp.exe",
-    ]:
-        if os.path.exists(candidate):
-            return candidate
     raise FileNotFoundError("yt-dlp not found. Install with: pip install yt-dlp")
 
 
 def _find_ffmpeg() -> str | None:
     """Find ffmpeg binary (optional, for audio extraction)."""
-    path = shutil.which("ffmpeg")
-    if path:
-        return path
-    candidate = r"C:\Users\siddhant\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.0.1-full_build\bin"
-    if os.path.isdir(candidate):
-        return candidate
-    return None
+    return shutil.which("ffmpeg")
 
 
 # ── Ingester ──────────────────────────────────────────────────────────────

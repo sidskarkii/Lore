@@ -23,7 +23,7 @@ def extract_web(url: str) -> ExtractedDocument:
         downloaded,
         include_comments=False,
         include_tables=True,
-        output_format="txt",
+        output_format="markdown",
     )
 
     # Get metadata
