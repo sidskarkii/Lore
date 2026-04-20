@@ -1,63 +1,70 @@
-# Lore - Rework TODO
+# Lore - TODO
 
-**Target platform:** macOS only, Apple Silicon (M1+), 16GB+ RAM
+**Target:** macOS, Apple Silicon (M1+), 16GB+ RAM
 
-## Architecture
-- [ ] Rich search returns: relevance scores, cross-references to related chunks in other collections, entity overlap with query
-- [ ] Local small model for UI chat (late stage): bundle small Gemma for offline use, OpenRouter as default
-- [ ] Settings UI: expose all configurable knobs (models, search params, chunking, transcription, provider) in the frontend settings page
+## Context Engineering
+- [ ] Progressive disclosure in search: return compact results first (title, section, collection, chunk_id, token_count), agent fetches full text via get_context. Balance between useful-at-a-glance and not requiring extra tool calls for simple queries
+- [ ] Entity-boosted search: extract entities from query, match against stored entities, boost chunks with entity overlap as third RRF signal
+- [ ] Token count estimates in search results so agent knows context budget cost before fetching
+- [ ] System prompt rework for RAG harness
 
 ## Search
-- [ ] Incremental FTS index updates instead of full rebuild on every ingest (replace=True gets slow at scale)
-- [ ] Query expansion: use LLM or synonym embeddings to expand queries before search ("donut" should match "torus modeling")
+- [ ] Incremental FTS index updates instead of full rebuild on every ingest
+- [ ] Query expansion via LLM or synonym embeddings
 
 ## Features
-- [ ] Store source documents: save cleaned markdown/txt of full content after extraction so UI can show a reader view
-- [ ] System prompt rework: current one is too naive, needs proper context engineering for the RAG harness
+- [ ] Store source documents as cleaned markdown after extraction for UI reader view
+- [ ] Settings UI: expose all configurable knobs in the frontend
 
 ## Transcription
-- [ ] Replace faster-whisper with sherpa-onnx: reuses existing ONNX Runtime, supports Whisper + Moonshine + Paraformer, CoreML on Apple Silicon
-- [ ] Default to a lightweight model (Moonshine tiny ~55MB or Whisper tiny ~75MB) for out-of-box experience
+- [ ] Replace faster-whisper with sherpa-onnx (ONNX Runtime, CoreML on Apple Silicon)
+- [ ] Default to lightweight model (Moonshine tiny ~55MB or Whisper tiny ~75MB)
+
+## Code Intelligence
+- [ ] tree-sitter-language-pack for multi-language AST parsing
+- [ ] Contextual chunk headers (class name + file path prefix)
+- [ ] Symbol table extraction (names + signatures as searchable entities)
+- [ ] Collapsed class summaries (method bodies -> { ... })
+- [ ] Reference graph + PageRank (Aider approach)
 
 ## Extractors
-- [ ] Code: add tree-sitter-language-pack (~2.5MB) for proper AST parsing of JS, TS, Go, Rust, Java, etc.
-- [ ] Code: contextual chunk headers (class name + file path prefix)
-- [ ] Code: symbol table extraction (function/class names + signatures as separate searchable entities)
-- [ ] Code: collapsed class summaries (method bodies replaced by { ... })
-- [ ] Code: reference graph + PageRank (Aider approach)
-- [ ] Web: switch trafilatura output_format from "txt" to "markdown" to preserve headings
-- [ ] PDF (optional): consider Docling for complex docs with tables/multi-column layouts
+- [ ] Web: switch trafilatura to markdown output (done, needs broader testing)
+- [ ] PDF: tune heading detection heuristics (some figure captions picked up as headings)
+- [ ] PDF: fix code block fragmentation on blank lines within code
 
-## Ingestion Pipeline
-- [ ] Remove hardcoded Windows paths, macOS only
-- [ ] Consolidate ingest_documents, ingest_file, ingest_url into one clean path
-- [ ] Chunk deduplication: hash chunk text and skip duplicates
+## Ingestion
 - [ ] Ingestion resume: track completed episodes so crashed ingests can resume
+- [ ] Consolidate remaining old ingest paths fully
 
 ## Enrichment
-- [ ] Add tags to LLM enrichment output
-- [ ] Consider reusing EmbeddingGemma for KeyBERT instead of loading separate all-MiniLM-L6-v2 (~80MB savings)
-- [ ] Batch multiple chunks into single LLM enrichment calls
-- [ ] Use structured output / JSON mode instead of fragile code fence parsing
+- [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings)
+- [ ] Structured output / JSON mode for LLM enrichment instead of code fence parsing
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
-## Frontend
-- [ ] Full UI rework
-- [ ] DMG packaging via Tauri sidecar (bundle Python backend)
+## Later
+- [ ] Frontend rework
+- [ ] DMG packaging via Tauri sidecar
+- [ ] Local small model for offline UI chat (Gemma)
+- [ ] MCP sampling for enrichment (use calling agent's LLM)
 
 ## Done
 - [x] Configurable host/port from config.yaml
 - [x] CORS regex instead of hardcoded origin list
 - [x] Chat route refactor: extracted shared helpers, dropped WebSocket endpoint
-- [x] Inline imports cleanup in embed.py, search.py, store.py
-- [x] Removed all truncations in reranker, LLM enrichment, and contextual prefixes
-- [x] MCP server: 7 tools mounted at /mcp (streamable HTTP) + stdio via --mcp-stdio
-- [x] Added expand parameter to SearchEngine.search()
-- [x] Added get_chunk_by_id() to Store
-- [x] EPUB extractor: recursive heading detection + code block preservation
-- [x] PDF extractor: font-aware code detection + bold heading detection, OCR disabled
-- [x] Provider cleanup: deleted CLI providers, simplified to custom/OpenRouter only
-- [x] Default model set to openrouter/elephant-alpha (free, 100B, tool use)
-- [x] Source-specific location fields: page_num, section_heading, chapter, line_start, line_end, chunk_index
-- [x] Document expansion via chunk_index instead of broken timestamp-based expansion
-- [x] Full ingestion pipeline tested end-to-end (EPUB -> chunks -> search -> RAG chat)
+- [x] Inline imports cleanup
+- [x] Removed all truncations in reranker, enrichment, contextual prefixes
+- [x] MCP server: 7 tools, streamable HTTP + stdio
+- [x] Search expand parameter + get_chunk_by_id
+- [x] EPUB extractor: recursive headings + code block preservation
+- [x] PDF extractor: font-aware code detection + heading detection, no OCR
+- [x] Provider cleanup: simplified to custom/OpenRouter only
+- [x] Default model: openrouter/elephant-alpha
+- [x] Source-specific location fields (page, section, chapter, lines, chunk_index)
+- [x] Document expansion via chunk_index (fixes timestamp=0 bug)
+- [x] Ingestion consolidation: shared _ingest_extracted helper
+- [x] Chunk deduplication via content hash
+- [x] Batch LLM enrichment with tags
+- [x] Windows paths removed
+- [x] Web extractor markdown output
+- [x] get_context fix for document sources
+- [x] Full pipeline tested end-to-end
