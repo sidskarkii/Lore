@@ -214,48 +214,68 @@ def _register_tools(mcp: FastMCP) -> None:
 
                 collection = m.group(1)
                 episode_num = int(m.group(2))
-                center = int(chunk.get("start_sec", 0))
+                has_timestamps = int(chunk.get("start_sec", 0)) > 0 or int(chunk.get("end_sec", 0)) > 0
             elif collection is not None and episode_num is not None and start_sec is not None:
-                center = start_sec
+                has_timestamps = True
             else:
                 return {"success": False, "error": "Provide chunk_id OR (collection + episode_num + start_sec)"}
 
-            if direction == "before":
-                window_start = max(0, center - amount_sec)
-                window_end = center
-            elif direction == "after":
-                window_end = center + amount_sec
-                window_start = center
+            if has_timestamps:
+                center = int(chunk.get("start_sec", 0)) if chunk_id else start_sec
+                if direction == "before":
+                    window_start = max(0, center - amount_sec)
+                    window_end = center
+                elif direction == "after":
+                    window_start = center
+                    window_end = center + amount_sec
+                else:
+                    half = amount_sec // 2
+                    window_start = max(0, center - half)
+                    window_end = center + half
+
+                neighbors = store.get_neighbors(
+                    collection=collection,
+                    episode_num=episode_num,
+                    start_sec=window_start,
+                    end_sec=window_end,
+                )
             else:
-                half = amount_sec // 2
-                window_start = max(0, center - half)
-                window_end = center + half
+                idx = int(chunk.get("chunk_index", 0)) if chunk_id else 0
+                expand_n = max(2, amount_sec // 60)
+                if direction == "before":
+                    idx_start = max(0, idx - expand_n)
+                    idx_end = idx
+                elif direction == "after":
+                    idx_start = idx
+                    idx_end = idx + expand_n
+                else:
+                    idx_start = max(0, idx - expand_n)
+                    idx_end = idx + expand_n
 
-            neighbors = store.get_neighbors(
-                collection=collection,
-                episode_num=episode_num,
-                start_sec=window_start,
-                end_sec=window_end,
-            )
+                neighbors = store.get_neighbors_by_index(
+                    collection=collection,
+                    episode_num=episode_num,
+                    chunk_index_start=idx_start,
+                    chunk_index_end=idx_end,
+                )
 
-            chunks = []
-            seen: set[tuple[int, int]] = set()
-            for row in neighbors:
-                key = (row["start_sec"], row["end_sec"])
-                if key not in seen:
-                    seen.add(key)
-                    chunks.append(_format_result(row))
+            chunks = [_format_result(row) for row in neighbors]
 
-            return {
+            result = {
                 "success": True,
                 "collection": collection,
                 "episode_num": episode_num,
-                "window_start_sec": window_start,
-                "window_end_sec": window_end,
                 "direction": direction,
                 "total": len(chunks),
                 "chunks": chunks,
             }
+            if has_timestamps:
+                result["window_start_sec"] = window_start
+                result["window_end_sec"] = window_end
+            else:
+                result["chunk_index_start"] = idx_start
+                result["chunk_index_end"] = idx_end
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 
