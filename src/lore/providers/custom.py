@@ -26,11 +26,12 @@ class CustomProvider(Provider):
     install_command = None  # User manages their own endpoint
 
     def _get_config(self) -> tuple[str | None, str | None, str | None]:
+        import os
         cfg = get_config()
         return (
-            cfg.get("provider.custom.base_url"),
-            cfg.get("provider.custom.api_key"),
-            cfg.get("provider.custom.model"),
+            os.environ.get("LORE_CUSTOM_BASE_URL") or cfg.get("provider.custom.base_url"),
+            os.environ.get("LORE_CUSTOM_API_KEY") or cfg.get("provider.custom.api_key"),
+            os.environ.get("LORE_CUSTOM_MODEL") or cfg.get("provider.custom.model"),
         )
 
     def detect(self) -> bool:

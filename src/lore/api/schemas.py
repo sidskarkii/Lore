@@ -11,6 +11,13 @@ from pydantic import BaseModel, Field
 
 
 # ── Search ────────────────────────────────────────────────────────────────
+"""
+SearchRequest takes a query string, optional result
+count, and optional topic/subtopic filters. SearchResult is what comes back
+for each match: the chunk text, which collection/episode it's from,
+timestamps, and a URL to link back to the source.
+"""
+#--------------------------------------------------------------------------
 
 class SearchRequest(BaseModel):
     """Search the knowledge base."""
@@ -43,6 +50,13 @@ class SearchResponse(BaseModel):
 
 
 # ── Chat ──────────────────────────────────────────────────────────────────
+"""
+ChatRequest carries the conversation history as a list of
+messages, plus options like how many sources to retrieve, whether to use
+multi-hop search, and optional provider/model overrides. ChatResponse bundles
+the LLM's answer with the sources it used.
+"""
+#---------------------------------------------------------------------------
 
 class ChatMessage(BaseModel):
     """A single message in a conversation."""
@@ -82,17 +96,15 @@ class ProviderModelInfo(BaseModel):
 
 
 class ProviderInfo(BaseModel):
-    """Status of a single provider."""
-    name: str = Field(..., description="Provider ID (e.g. 'kilo', 'claude_code')")
+    """Status of a provider."""
+    name: str = Field(..., description="Provider ID")
     display_name: str = Field(..., description="Human-readable name")
     installed: bool = False
     authenticated: bool = False
     version: str | None = None
-    user: str | None = None
     error: str | None = None
     models: list[ProviderModelInfo] = Field(default_factory=list)
     free_model_count: int = 0
-    install_command: str | None = None
     is_active: bool = False
 
 
@@ -106,18 +118,6 @@ class SetActiveRequest(BaseModel):
     """Switch the active provider."""
     provider: str = Field(..., description="Provider name to activate")
     model: str | None = Field(None, description="Default model for this provider")
-
-
-class InstallRequest(BaseModel):
-    """Request to install a provider's CLI."""
-    provider: str = Field(..., description="Provider name to install")
-
-
-class InstallResponse(BaseModel):
-    """Result of an install attempt."""
-    success: bool
-    provider: str
-    error: str | None = None
 
 
 class TestConnectionRequest(BaseModel):
@@ -137,6 +137,11 @@ class TestConnectionResponse(BaseModel):
 
 
 # ── Collections ───────────────────────────────────────────────────────────
+"""
+For browsing and managing indexed content. A collection is a group of related content (like a YouTube playlist), and each has episodes within it.
+"""
+# ----------------------------------------------------------------------------
+
 
 class EpisodeInfo(BaseModel):
     """An episode within a collection."""
@@ -166,7 +171,12 @@ class DeleteCollectionRequest(BaseModel):
 
 
 # ── Sessions ──────────────────────────────────────────────────────────────
-
+"""
+Chat session persistence. SessionDetail extends
+SessionInfo (line 192) to add the full message list, so the list view can be
+lightweight while the detail view has everything.
+"""
+# ----------------------------------------------------------------------------
 class MessageInfo(BaseModel):
     """A message in a chat session."""
     id: str

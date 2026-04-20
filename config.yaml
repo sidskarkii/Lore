@@ -1,5 +1,10 @@
-# TutorialVault Configuration
+# Lore Configuration
 # All paths are relative to this file's directory unless absolute.
+
+# --- Server ---
+server:
+  host: 127.0.0.1
+  port: 8000
 
 # --- Storage ---
 store:
@@ -61,23 +66,10 @@ transcription:
   language: en
 
 # --- Provider (LLM inference) ---
+# Configure via config.local.yaml or environment variables:
+#   LORE_CUSTOM_BASE_URL, LORE_CUSTOM_API_KEY, LORE_CUSTOM_MODEL
 provider:
-  # Active provider: claude_code, opencode, codex, kilo, local_gguf, custom
-  active: opencode
-  # Default model per provider (override in provider-specific config)
-  claude_code:
-    model: sonnet
-  opencode:
-    model: opencode/minimax-m2.5-free
-  codex:
-    model: o4-mini
-  kilo:
-    model: x-ai/grok-code-fast-1:optimized:free
-  local_gguf:
-    model_path: null  # path to .gguf file
-    n_gpu_layers: -1  # -1 = all layers on GPU
-    n_ctx: 8192
+  active: custom
   custom:
-    base_url: null
-    api_key: null
-    model: null
+    base_url: https://openrouter.ai/api/v1
+    model: openrouter/elephant-alpha
