@@ -23,25 +23,17 @@ def extract_epub(path: str) -> ExtractedDocument:
     sections: list[dict] = []
     for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
         soup = BeautifulSoup(item.get_content(), "html.parser")
-
-        # Chapter title from first heading
-        heading = soup.find(re.compile(r"^h[1-3]$"))
-        title = heading.get_text(strip=True) if heading else ""
-
         body = soup.find("body") or soup
-
-        # Split by sub-headings within the chapter
         sub_sections = _split_by_headings(body)
         if sub_sections:
-            if not sub_sections[0]["title"] and title:
-                sub_sections[0]["title"] = title
             sections.extend(sub_sections)
         else:
             text = body.get_text(separator="\n", strip=True)
             if text.strip():
+                heading = soup.find(re.compile(r"^h[1-3]$"))
+                title = heading.get_text(strip=True) if heading else ""
                 sections.append({"title": title, "text": text})
 
-    # Filter out very short sections (navigation, copyright, etc.)
     sections = [s for s in sections if len(s["text"].split()) > 10]
 
     metadata: dict = {"filename": p.name}
@@ -64,33 +56,38 @@ def extract_epub(path: str) -> ExtractedDocument:
 
 
 def _split_by_headings(soup) -> list[dict]:
-    """Split an HTML body into sections by h1-h3 tags."""
+    """Split HTML content into sections by h1-h3 tags (recursive search)."""
     from bs4 import NavigableString, Tag
 
+    headings = soup.find_all(re.compile(r"^h[1-3]$"))
+    if not headings:
+        return []
+
     sections: list[dict] = []
-    current_title = ""
-    current_parts: list[str] = []
-
-    for child in soup.children:
-        if isinstance(child, Tag) and re.match(r"^h[1-3]$", child.name):
-            if current_parts:
-                text = "\n".join(current_parts).strip()
+    for h in headings:
+        title = h.get_text(strip=True)
+        parts: list[str] = []
+        sibling = h.next_sibling
+        while sibling:
+            if isinstance(sibling, Tag):
+                if re.match(r"^h[1-4]$", sibling.name or ""):
+                    break
+                if sibling.name == "pre":
+                    parts.append(f"```\n{sibling.get_text()}\n```")
+                else:
+                    if sibling.find(re.compile(r"^h[1-3]$")):
+                        break
+                    text = sibling.get_text(separator="\n", strip=True)
+                    if text:
+                        parts.append(text)
+            elif isinstance(sibling, NavigableString):
+                text = str(sibling).strip()
                 if text:
-                    sections.append({"title": current_title, "text": text})
-            current_title = child.get_text(strip=True)
-            current_parts = []
-        elif isinstance(child, Tag):
-            text = child.get_text(separator="\n", strip=True)
-            if text:
-                current_parts.append(text)
-        elif isinstance(child, NavigableString):
-            text = str(child).strip()
-            if text:
-                current_parts.append(text)
+                    parts.append(text)
+            sibling = sibling.next_sibling
 
-    if current_parts:
-        text = "\n".join(current_parts).strip()
-        if text:
-            sections.append({"title": current_title, "text": text})
+        body_text = "\n\n".join(parts)
+        if body_text.strip():
+            sections.append({"title": title, "text": body_text})
 
     return sections
