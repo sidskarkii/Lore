@@ -440,6 +440,12 @@ class Ingester:
         from .enrich import enrich_programmatic, enrich_llm
         from ..providers.registry import get_registry
 
+        collection = _sanitize(name)
+        existing = [c for c in self.store.list_collections() if c["collection"] == collection]
+        if existing:
+            print(f"  Collection '{name}' already exists, skipping.")
+            return 0
+
         item_name = Path(source_path).name if not source_path.startswith("http") else source_path
 
         if on_progress:
@@ -479,7 +485,6 @@ class Ingester:
                 message=f"Embedding {len(chunks)} chunks...",
             ))
 
-        collection = _sanitize(name)
         meta = {
             "collection": collection,
             "collection_display": name,
