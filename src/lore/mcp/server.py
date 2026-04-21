@@ -12,7 +12,10 @@ Tools:
 
 from __future__ import annotations
 
+import asyncio
 import re
+import uuid
+from pathlib import Path
 from typing import Annotated
 
 from mcp.server.fastmcp import FastMCP, Context
@@ -23,6 +26,8 @@ from ..core.config import get_config
 from ..core.search import get_search_engine
 from ..core.store import get_store
 from ..providers.registry import get_registry
+
+_ingest_jobs: dict[str, dict] = {}
 
 
 def create_mcp_server() -> FastMCP:
@@ -333,9 +338,12 @@ def _register_tools(mcp: FastMCP) -> None:
         name: Annotated[str, Field(description="Display name for the collection (e.g. 'Blender Donut Tutorial').")],
         topic: Annotated[str, Field(default="", description="Topic category (e.g. '3d', 'ai', 'code').")] = "",
         subtopic: Annotated[str, Field(default="", description="Subtopic (e.g. 'blender', 'python').")] = "",
-        ctx: Context | None = None,
     ) -> dict:
-        """Ingest content into the knowledge base.
+        """Ingest content into the knowledge base (non-blocking).
+
+        Queues the ingestion job and returns immediately with a job_id.
+        Use ingest_status(job_id) to check progress. You can keep
+        searching and working while ingestion runs in the background.
 
         Auto-detects the source type:
         - YouTube URL (youtube.com or youtu.be) -> downloads transcript/audio
@@ -343,70 +351,90 @@ def _register_tools(mcp: FastMCP) -> None:
         - Directory path -> ingests all video/audio files in folder
         - File path -> ingests document (PDF, EPUB, markdown, code, audio/video)
 
-        WHEN TO USE: When the user wants to add new content to their knowledge
-        base. This is a potentially long-running operation (especially for
-        video playlists). Progress updates are reported during ingestion.
-
-        RETURNS: Dict with success status and number of chunks indexed.
+        RETURNS: Dict with job_id to track progress via ingest_status.
         """
-        import asyncio
-        from pathlib import Path
         from ..core.ingest import Ingester, IngestionProgress
 
-        try:
-            ingester = Ingester()
-            loop = asyncio.get_event_loop()
+        is_youtube = bool(re.search(r"(youtube\.com|youtu\.be)", source))
+        is_url = source.startswith("http://") or source.startswith("https://")
+        is_dir = Path(source).is_dir()
+        is_file = Path(source).is_file()
 
-            def on_progress(p: IngestionProgress):
-                if ctx:
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            ctx.report_progress(
-                                progress=p.completed_items,
-                                total=p.total_items,
-                            ),
-                            loop,
-                        )
-                        future.result(timeout=5)
-                    except Exception:
-                        pass
+        if not (is_youtube or is_url or is_dir or is_file):
+            return {"success": False, "error": f"Source not found or unrecognized: {source}"}
 
-            is_youtube = bool(re.search(r"(youtube\.com|youtu\.be)", source))
-            is_url = source.startswith("http://") or source.startswith("https://")
-            is_dir = Path(source).is_dir()
-            is_file = Path(source).is_file()
+        job_id = uuid.uuid4().hex[:8]
+        _ingest_jobs[job_id] = {
+            "status": "queued",
+            "source": source,
+            "name": name,
+            "chunks": 0,
+            "message": "Queued for ingestion",
+            "error": None,
+        }
 
-            if is_youtube:
-                chunks = await asyncio.to_thread(
-                    ingester.ingest_youtube,
-                    url=source, name=name, topic=topic, subtopic=subtopic,
-                    on_progress=on_progress,
-                )
-            elif is_url:
-                chunks = await asyncio.to_thread(
-                    ingester.ingest_url,
-                    url=source, name=name, topic=topic, subtopic=subtopic,
-                    on_progress=on_progress,
-                )
-            elif is_dir:
-                chunks = await asyncio.to_thread(
-                    ingester.ingest_folder,
-                    folder=source, name=name, topic=topic, subtopic=subtopic,
-                    on_progress=on_progress,
-                )
-            elif is_file:
-                chunks = await asyncio.to_thread(
-                    ingester.ingest_file,
-                    path=source, name=name, topic=topic, subtopic=subtopic,
-                    on_progress=on_progress,
-                )
-            else:
-                return {"success": False, "error": f"Source not found or unrecognized: {source}"}
+        async def _run_ingest():
+            try:
+                _ingest_jobs[job_id]["status"] = "running"
+                _ingest_jobs[job_id]["message"] = "Starting ingestion..."
+                ingester = Ingester()
 
-            return {"success": True, "chunks": chunks, "message": f"Ingested {chunks} chunks from {source}"}
+                def on_progress(p: IngestionProgress):
+                    _ingest_jobs[job_id]["message"] = f"{p.stage}: {p.message or ''}"
 
-        except Exception as e:
-            return {"success": False, "error": str(e)}
+                kwargs = dict(name=name, topic=topic, subtopic=subtopic, on_progress=on_progress)
+
+                if is_youtube:
+                    chunks = await asyncio.to_thread(ingester.ingest_youtube, url=source, **kwargs)
+                elif is_url:
+                    chunks = await asyncio.to_thread(ingester.ingest_url, url=source, **kwargs)
+                elif is_dir:
+                    chunks = await asyncio.to_thread(ingester.ingest_folder, folder=source, **kwargs)
+                else:
+                    chunks = await asyncio.to_thread(ingester.ingest_file, path=source, **kwargs)
+
+                _ingest_jobs[job_id]["status"] = "done"
+                _ingest_jobs[job_id]["chunks"] = chunks
+                _ingest_jobs[job_id]["message"] = f"Ingested {chunks} chunks"
+
+            except Exception as e:
+                _ingest_jobs[job_id]["status"] = "error"
+                _ingest_jobs[job_id]["error"] = str(e)
+                _ingest_jobs[job_id]["message"] = f"Failed: {e}"
+
+        asyncio.create_task(_run_ingest())
+
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "queued",
+            "message": f"Ingestion queued for {source}. Use ingest_status(job_id='{job_id}') to check progress.",
+        }
+
+    # ── ingest_status ───────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def ingest_status(
+        job_id: Annotated[str | None, Field(default=None, description="Job ID from ingest call. Omit to see all jobs.")] = None,
+    ) -> dict:
+        """Check the status of an ingestion job.
+
+        WHEN TO USE: After calling ingest, to check if it's still running,
+        completed, or failed. Omit job_id to see all active/recent jobs.
+
+        RETURNS: Job status (queued, running, done, error), progress message,
+        and chunk count when complete.
+        """
+        if job_id:
+            job = _ingest_jobs.get(job_id)
+            if not job:
+                return {"success": False, "error": f"Unknown job: {job_id}"}
+            return {"success": True, "job_id": job_id, **job}
+
+        return {
+            "success": True,
+            "jobs": {jid: j for jid, j in _ingest_jobs.items()},
+        }
 
     # ── list_collections ─────────────────────────────────────────────
 

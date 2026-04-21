@@ -1,6 +1,13 @@
 """Lore server — run with: python -m lore"""
 
+import os
 import threading
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).resolve().parents[2] / ".env")
+
 import uvicorn
 
 from .api.app import create_app

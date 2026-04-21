@@ -86,7 +86,12 @@ class Config:
 
     @staticmethod
     def _find_config() -> Path | None:
-        """Walk up from cwd looking for config.yaml."""
+        """Find config.yaml — check package root first, then walk up from cwd."""
+        pkg_root = Path(__file__).resolve().parents[3]
+        pkg_config = pkg_root / "config.yaml"
+        if pkg_config.exists():
+            return pkg_config
+
         cur = Path.cwd()
         for _ in range(10):
             candidate = cur / "config.yaml"

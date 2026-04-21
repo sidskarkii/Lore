@@ -21,7 +21,10 @@ def extract_epub(path: str) -> ExtractedDocument:
     book = epub.read_epub(str(p.resolve()), options={"ignore_ncx": True})
 
     sections: list[dict] = []
-    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+    for item_id, _ in book.spine:
+        item = book.get_item_with_id(item_id)
+        if not item:
+            continue
         soup = BeautifulSoup(item.get_content(), "html.parser")
         body = soup.find("body") or soup
         sub_sections = _split_by_headings(body)

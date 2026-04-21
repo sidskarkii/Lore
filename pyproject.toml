@@ -19,12 +19,19 @@ dependencies = [
     "openai>=1.40",
     "sse-starlette>=2.0",
     "mcp[cli]>=1.9",
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
 # Full install with all features
 all = [
-    "lore[gpu,transcribe,local]",
+    "lore[gpu,transcribe,local,enrich]",
+]
+# Enrichment (keywords, NER, summaries)
+enrich = [
+    "keybert>=0.8",
+    "spacy>=3.7",
+    "scikit-learn>=1.3",
 ]
 # GPU-accelerated ONNX inference
 gpu = [

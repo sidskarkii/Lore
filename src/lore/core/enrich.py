@@ -3,6 +3,33 @@
 from __future__ import annotations
 
 import json
+import time
+
+_kw_model = None
+_nlp = None
+
+
+def _get_kw_model():
+    global _kw_model
+    if _kw_model is None:
+        from keybert import KeyBERT
+        print("  [enrich] Loading KeyBERT model...")
+        _kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+        print("  [enrich] KeyBERT ready.")
+    return _kw_model
+
+
+def _get_nlp():
+    global _nlp
+    if _nlp is None:
+        import spacy
+        try:
+            _nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            spacy.cli.download("en_core_web_sm")
+            _nlp = spacy.load("en_core_web_sm")
+        print("  [enrich] spaCy ready.")
+    return _nlp
 
 
 def enrich_programmatic(chunks: list[dict]) -> list[dict]:
@@ -22,9 +49,7 @@ def enrich_programmatic(chunks: list[dict]) -> list[dict]:
 def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
     """Extract keywords using KeyBERT."""
     try:
-        from keybert import KeyBERT
-
-        kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+        kw_model = _get_kw_model()
         results = []
         for text in texts:
             if len(text.split()) < 10:
@@ -48,14 +73,7 @@ def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
 def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
     """Extract named entities using spaCy."""
     try:
-        import spacy
-
-        try:
-            nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            spacy.cli.download("en_core_web_sm")
-            nlp = spacy.load("en_core_web_sm")
-
+        nlp = _get_nlp()
         results = []
         for doc in nlp.pipe(texts, batch_size=32):
             ents = []
@@ -87,25 +105,58 @@ Chunks:
 {chunks}"""
 
 
-def enrich_llm(chunks: list[dict], provider, batch_size: int = 5) -> list[dict]:
+def _llm_call_with_retry(provider, messages, max_retries: int = 3) -> str:
+    """LLM call with exponential backoff on rate limits."""
+    for attempt in range(max_retries + 1):
+        try:
+            response = provider.chat(messages, model=None)
+            if response is None:
+                raise ValueError("Provider returned None")
+            return response
+        except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "rate" in err_str.lower()
+            if is_rate_limit and attempt < max_retries:
+                wait = 2 ** attempt * 3
+                print(f"  [enrich] Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise
+
+
+def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min: float = 7.5) -> list[dict]:
     """Add LLM-generated enrichment: title, summary, tags, questions, semantic_key.
 
     Batches multiple chunks per LLM call for efficiency.
+    Throttles to calls_per_min to avoid rate limits on free tiers.
     """
+    min_interval = 60.0 / calls_per_min
     enrichable = [(i, c) for i, c in enumerate(chunks) if len(c["text"].split()) >= 15]
+    total_batches = (len(enrichable) + batch_size - 1) // batch_size
+    print(f"  [enrich] LLM enrichment: {len(enrichable)} chunks in {total_batches} batches (~{min_interval:.0f}s apart)")
 
+    last_call = 0.0
     for batch_start in range(0, len(enrichable), batch_size):
         batch = enrichable[batch_start:batch_start + batch_size]
+        batch_num = batch_start // batch_size + 1
+
+        elapsed = time.time() - last_call
+        if last_call > 0 and elapsed < min_interval:
+            wait = min_interval - elapsed
+            time.sleep(wait)
+
+        print(f"  [enrich] Batch {batch_num}/{total_batches}...")
 
         chunks_text = ""
         for idx, (_, chunk) in enumerate(batch):
             chunks_text += f"\n--- Chunk {idx + 1} ---\n{chunk['text']}\n"
 
         try:
+            last_call = time.time()
             prompt = _ENRICH_PROMPT.format(chunks=chunks_text)
-            response = provider.chat(
+            response = _llm_call_with_retry(
+                provider,
                 [{"role": "user", "content": prompt}],
-                model=None,
             )
 
             json_str = response.strip()

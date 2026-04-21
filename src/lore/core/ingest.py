@@ -437,7 +437,8 @@ class Ingester:
         on_progress: ProgressCallback = None,
     ) -> int:
         """Shared pipeline for file and URL ingestion: chunk -> enrich -> store."""
-        from .enrich import enrich_programmatic
+        from .enrich import enrich_programmatic, enrich_llm
+        from ..providers.registry import get_registry
 
         item_name = Path(source_path).name if not source_path.startswith("http") else source_path
 
@@ -460,6 +461,16 @@ class Ingester:
                     message="Extracting keywords and entities...",
                 ))
             chunks = enrich_programmatic(chunks)
+
+            provider = get_registry().active
+            if provider:
+                if on_progress:
+                    on_progress(IngestionProgress(
+                        stage="enriching", progress=0.6, current_item=item_name,
+                        total_items=1, completed_items=0,
+                        message="LLM enrichment (titles, summaries, tags)...",
+                    ))
+                chunks = enrich_llm(chunks, provider)
 
         if on_progress:
             on_progress(IngestionProgress(

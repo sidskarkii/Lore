@@ -35,8 +35,10 @@ desktop.ini
 # HuggingFace cache
 .cache/
 
-# Config overrides (may contain API keys)
+# Config overrides and secrets
 config.local.yaml
+.env
+.env.*
 
 # Eval outputs
 eval_results/
@@ -51,6 +53,8 @@ tests/test_output.*
 # Claude Code / AI tool artifacts
 .claude/
 .kilocodemodes
+CLAUDE.md
+**/CLAUDE.md
 
 # UI
 ui/node_modules/
