@@ -28,6 +28,8 @@ from ..core.store import get_store
 from ..providers.registry import get_registry
 
 _ingest_jobs: dict[str, dict] = {}
+_ingest_queue: asyncio.Queue | None = None
+_ingest_worker_started = False
 
 
 def _build_instructions() -> str:
@@ -354,6 +356,18 @@ def _register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    # ── ingest worker (sequential queue) ──────────────────────────────
+
+    async def _ingest_worker():
+        while True:
+            job_id, run_fn = await _ingest_queue.get()
+            try:
+                await run_fn()
+            except Exception as e:
+                _ingest_jobs[job_id]["status"] = "error"
+                _ingest_jobs[job_id]["error"] = str(e)
+            _ingest_queue.task_done()
+
     # ── ingest ───────────────────────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False))
@@ -426,7 +440,14 @@ def _register_tools(mcp: FastMCP) -> None:
                 _ingest_jobs[job_id]["error"] = str(e)
                 _ingest_jobs[job_id]["message"] = f"Failed: {e}"
 
-        asyncio.create_task(_run_ingest())
+        global _ingest_queue, _ingest_worker_started
+        if _ingest_queue is None:
+            _ingest_queue = asyncio.Queue()
+        if not _ingest_worker_started:
+            _ingest_worker_started = True
+            asyncio.create_task(_ingest_worker())
+
+        await _ingest_queue.put((job_id, _run_ingest))
 
         return {
             "success": True,
@@ -438,7 +459,7 @@ def _register_tools(mcp: FastMCP) -> None:
     # ── ingest_status ───────────────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def ingest_status(
+    async def ingest_status(
         job_id: Annotated[str | None, Field(default=None, description="Job ID from ingest call. Omit to see all jobs.")] = None,
     ) -> dict:
         """Check the status of an ingestion job.
