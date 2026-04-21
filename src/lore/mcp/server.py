@@ -30,18 +30,42 @@ from ..providers.registry import get_registry
 _ingest_jobs: dict[str, dict] = {}
 
 
+def _build_instructions() -> str:
+    """Build dynamic MCP instructions with current store stats."""
+    base = (
+        "Lore is a local-first RAG knowledge base. It indexes videos, documents, "
+        "code, and web pages into searchable chunks with timestamp-level precision."
+    )
+    try:
+        store = get_store()
+        collections = store.list_collections()
+        total = store.chunk_count()
+        if collections:
+            topics = sorted({c["topic"] for c in collections if c["topic"]})
+            names = [c["collection_display"] for c in collections]
+            base += (
+                f" Currently indexed: {total} chunks across {len(collections)} collections "
+                f"({', '.join(names[:5])}{'...' if len(names) > 5 else ''})."
+                f" Topics: {', '.join(topics)}." if topics else ""
+            )
+        else:
+            base += " No content indexed yet — use 'ingest' to add content."
+    except Exception:
+        pass
+
+    base += (
+        " Use 'search' for most queries — results are compact by default (metadata "
+        "only, no full text). Scan scores and summaries, then call 'get_context' to "
+        "fetch full text for results you need. Use 'get_toc' to browse a collection's "
+        "structure. Use 'search_deep' for complex multi-topic questions."
+    )
+    return base
+
+
 def create_mcp_server() -> FastMCP:
     mcp = FastMCP(
         "Lore",
-        instructions=(
-            "Lore is a local-first RAG knowledge base. It indexes videos, documents, "
-            "code, and web pages into searchable chunks with timestamp-level precision. "
-            "Use 'search' for most queries — results are compact by default (metadata "
-            "only, no full text). Scan the scores, summaries, and token_counts, then "
-            "call 'get_context' with chunk_id to fetch full text for the results you "
-            "actually need. Use 'search_deep' for complex questions spanning multiple "
-            "topics. Use 'list_collections' to see what's indexed before searching."
-        ),
+        instructions=_build_instructions(),
         stateless_http=True,
         json_response=True,
         streamable_http_path="/",
@@ -435,6 +459,35 @@ def _register_tools(mcp: FastMCP) -> None:
             "success": True,
             "jobs": {jid: j for jid, j in _ingest_jobs.items()},
         }
+
+    # ── get_toc ──────────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def get_toc(
+        collection: Annotated[str, Field(description="Collection ID. Use list_collections to find IDs.")],
+    ) -> dict:
+        """Get the table of contents for a collection.
+
+        Returns the document structure: sections/chapters in reading order,
+        each with chunk count, token estimate, and first_chunk_id for
+        navigating directly to that section via get_context.
+
+        WHEN TO USE: To understand what a book/document covers before
+        searching. Lets you browse by structure instead of keyword.
+        """
+        try:
+            store = get_store()
+            sections = store.get_toc(collection)
+            total_tokens = sum(s["token_count"] for s in sections)
+            return {
+                "success": True,
+                "collection": collection,
+                "total_sections": len(sections),
+                "total_tokens": total_tokens,
+                "sections": sections,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # ── list_collections ─────────────────────────────────────────────
 

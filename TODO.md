@@ -26,12 +26,12 @@ All computed locally from existing data (embeddings, NER entities, keywords) —
 
 ### Agent Onboarding (AX — agent experience)
 Progressive disclosure for the agent itself: base knowledge automatic, deeper knowledge available, power features opt-in.
-- [ ] Layer 1: Dynamic MCP instructions — on connect, agent automatically sees: collection count, topic list, total chunks, one-line usage guide. No tool call needed, just a smarter instructions string that reads current state
+- [x] Layer 1: Dynamic MCP instructions — on connect, agent automatically sees: collection count, topic list, total chunks, one-line usage guide. No tool call needed, just a smarter instructions string that reads current state
 - [ ] Layer 2: `intro` tool — on-demand deep orientation. Returns structured data: collections with summaries, suggested workflows (compact search -> expand -> get_context), ingestion nudges ("if you find YouTube links or PDFs on this topic, ingest them for deeper research"). Makes the agent want to use Lore proactively
 - [ ] Layer 3: `/lore` Claude Code skill — loads full workflow prompt template. Teaches optimal patterns, available tools, tips. Power user opt-in, similar to claude-mem's skill approach
 
 ### Retrieval UX
-- [ ] `get_toc(collection)` tool — returns document structure (parts, chapters, sections) for structural navigation
+- [x] `get_toc(collection)` tool — returns document structure (parts, chapters, sections) for structural navigation
 - [ ] Paginated context expansion — `get_context` returns pages instead of dumping full neighborhood. Agent controls page size via `page_tokens` param (e.g. 50 or 1000 tokens per page) and navigates with `page` param. Each response includes total pages so agent knows how much is left
 - [ ] Built-in dedup — search and get_context never return content the agent already has in the current response
 - [ ] Search returns all compact by default; agent selectively expands individual results (current compact/expand model but with pagination on expand side)
@@ -53,6 +53,27 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 - [ ] Upgrade to Thompson Sampling — same data model (alpha=fetches, beta=ignores) but adds stochastic exploration. Uncertain chunks occasionally surface higher to gather signal. Switch when we want active exploration behavior
 - [ ] Rating persistence across sessions — SQLite table survives server restarts, improves ranking over weeks of use
 - [ ] Self-improving pipeline — when critical mass hit: train chunk co-occurrence model, session sequence patterns, query-chunk affinity. Retrain periodically as more data accumulates. Log format designed to be consumable by RL frameworks
+
+## Wiki Layer (Karpathy LLM Wiki pattern)
+Synthesized knowledge layer on top of raw chunks. Classical ML finds connections, LLM writes the pages.
+- [ ] **Source summary pages** — one per ingested source, auto-generated after ingestion. Key points, concepts mentioned, entities, confidence. Stored as searchable chunks alongside raw content
+- [ ] **Concept pages** — one per major topic (e.g. "transformer attention", "social proof"). Synthesized across ALL sources that mention the concept. Updated when new sources add info. BERTopic clusters identify which concepts exist, LLM writes the page
+- [ ] **Entity pages** — one per person/org/tool. Consolidated from fuzzy-merged NER entities across sources. LLM writes overview, characteristics, related concepts
+- [ ] **Synthesis pages** — cross-cutting comparisons generated on demand ("compare how Book A and Book B discuss leadership"). Created when agent asks, persisted for future queries
+- [ ] **Cross-references** — every wiki page links to related pages. Built from entity co-occurrence graph + embedding similarity
+- [ ] **Confidence tracking** — claims tagged high/medium/low based on number of corroborating sources. Multiple sources saying the same thing = high confidence
+- [ ] **Lint/audit tool** — periodic health check: find orphan pages, contradictions between sources, gaps, stale claims. Auto-fix what's possible, report the rest
+- [ ] **Wiki search** — agent can search raw chunks OR wiki pages. Wiki pages surface synthesized knowledge, raw chunks surface source material
+- [ ] **Incremental wiki updates** — new source ingested triggers updates to existing concept/entity pages, not just creation of new ones
+
+## Smart Model Routing
+Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for simple tasks, big models for complex ones.
+- [ ] Task-based routing config in config.yaml: `routing.summarize`, `routing.synthesize`, `routing.reason`, `routing.default`
+- [ ] Small model for chunk summaries/titles/tags (e.g. `gemma-3-4b-it:free` — fast, good enough)
+- [ ] Big model for concept page synthesis, entity consolidation, contradiction detection (e.g. `gpt-oss-120b:free` or `nemotron-3-super-120b`)
+- [ ] Fallback chain: if preferred model is rate-limited, try next in list
+- [ ] Token/cost tracking per task type for monitoring which routes are expensive
+- [ ] Local model override: when Ollama is available, route simple tasks to local Gemma 4 E4B instead of API
 
 ## Search
 - [ ] Incremental FTS index updates instead of full rebuild on every ingest

@@ -279,6 +279,47 @@ class Store:
         except Exception:
             return None
 
+    def get_toc(self, collection: str) -> list[dict]:
+        """Return table-of-contents structure for a collection: ordered sections with chunk counts and token estimates."""
+        tbl = self._get_or_create_table()
+        rows = (
+            tbl.search()
+            .where(f"collection = '{collection}'")
+            .select(["id", "chunk_index", "section_heading", "chapter", "episode_num", "episode_title", "text", "title", "source_type"])
+            .limit(100_000)
+            .to_list()
+        )
+        if not rows:
+            return []
+
+        rows.sort(key=lambda r: (r.get("episode_num", 0), r.get("chunk_index", 0)))
+
+        sections: list[dict] = []
+        current_heading = None
+        current_section = None
+
+        for r in rows:
+            heading = r.get("section_heading") or r.get("chapter") or ""
+            if heading != current_heading:
+                if current_section:
+                    sections.append(current_section)
+                current_heading = heading
+                current_section = {
+                    "heading": heading,
+                    "chunk_count": 0,
+                    "token_count": 0,
+                    "first_chunk_id": r.get("id", ""),
+                    "source_type": r.get("source_type", ""),
+                }
+            if current_section:
+                current_section["chunk_count"] += 1
+                current_section["token_count"] += len(r.get("text", "")) // 4
+
+        if current_section:
+            sections.append(current_section)
+
+        return sections
+
     # ── Search primitives ─────────────────────────────────────────────
 
     def vector_search(
