@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -29,10 +30,22 @@ from ..core.store import get_store
 from ..providers.registry import get_registry
 
 _ingest_jobs: dict[str, dict] = {}
+_ingest_jobs_lock = threading.Lock()
 _ingest_queue: asyncio.Queue | None = None
-_session_id = uuid.uuid4().hex[:12]
-_last_shown_ids: list[str] = []
 _ingest_worker_started = False
+
+_session_lock = threading.Lock()
+_sessions: dict[str, dict] = {}
+
+
+def _get_session(session_id: str) -> dict:
+    with _session_lock:
+        if session_id not in _sessions:
+            _sessions[session_id] = {"last_shown_ids": []}
+        return _sessions[session_id]
+
+
+_default_session_id = uuid.uuid4().hex[:12]
 
 
 def _build_instructions() -> str:
@@ -196,12 +209,13 @@ def _register_tools(mcp: FastMCP) -> None:
             formatter = _format_compact_result if compact else _format_result
             formatted = [formatter(r) for r in results]
 
-            _last_shown_ids.clear()
-            _last_shown_ids.extend([f["chunk_id"] for f in formatted])
+            shown_ids = [f["chunk_id"] for f in formatted]
+            session = _get_session(_default_session_id)
+            session["last_shown_ids"] = shown_ids
             try:
                 get_database().log_interaction(
-                    session_id=_session_id, action="search",
-                    query=query, chunk_ids_shown=list(_last_shown_ids),
+                    session_id=_default_session_id, action="search",
+                    query=query, chunk_ids_shown=shown_ids,
                 )
             except Exception:
                 pass
@@ -259,12 +273,13 @@ def _register_tools(mcp: FastMCP) -> None:
             formatter = _format_compact_result if compact else _format_result
             formatted = [formatter(r) for r in results]
 
-            _last_shown_ids.clear()
-            _last_shown_ids.extend([f["chunk_id"] for f in formatted])
+            shown_ids = [f["chunk_id"] for f in formatted]
+            session = _get_session(_default_session_id)
+            session["last_shown_ids"] = shown_ids
             try:
                 get_database().log_interaction(
-                    session_id=_session_id, action="search_deep",
-                    query=query, chunk_ids_shown=list(_last_shown_ids),
+                    session_id=_default_session_id, action="search_deep",
+                    query=query, chunk_ids_shown=shown_ids,
                 )
             except Exception:
                 pass
@@ -390,12 +405,14 @@ def _register_tools(mcp: FastMCP) -> None:
             fetched_ids = [c["chunk_id"] for c in chunks]
             if chunk_id and chunk_id not in fetched_ids:
                 fetched_ids.append(chunk_id)
-            ignored_from_last = [cid for cid in _last_shown_ids if cid not in fetched_ids] if _last_shown_ids else []
+            session = _get_session(_default_session_id)
+            last_shown = session.get("last_shown_ids", [])
+            ignored_from_last = [cid for cid in last_shown if cid not in fetched_ids] if last_shown else []
             try:
                 get_database().log_interaction(
-                    session_id=_session_id, action="get_context",
+                    session_id=_default_session_id, action="get_context",
                     chunk_ids_fetched=fetched_ids,
-                    chunk_ids_shown=list(_last_shown_ids) if _last_shown_ids else None,
+                    chunk_ids_shown=last_shown if last_shown else None,
                     chunk_ids_ignored=ignored_from_last if ignored_from_last else None,
                 )
             except Exception:
@@ -467,23 +484,26 @@ def _register_tools(mcp: FastMCP) -> None:
             return {"success": False, "error": f"Source not found or unrecognized: {source}"}
 
         job_id = uuid.uuid4().hex[:8]
-        _ingest_jobs[job_id] = {
-            "status": "queued",
-            "source": source,
-            "name": name,
-            "chunks": 0,
-            "message": "Queued for ingestion",
-            "error": None,
-        }
+        with _ingest_jobs_lock:
+            _ingest_jobs[job_id] = {
+                "status": "queued",
+                "source": source,
+                "name": name,
+                "chunks": 0,
+                "message": "Queued for ingestion",
+                "error": None,
+            }
 
         async def _run_ingest():
             try:
-                _ingest_jobs[job_id]["status"] = "running"
-                _ingest_jobs[job_id]["message"] = "Starting ingestion..."
+                with _ingest_jobs_lock:
+                    _ingest_jobs[job_id]["status"] = "running"
+                    _ingest_jobs[job_id]["message"] = "Starting ingestion..."
                 ingester = Ingester()
 
                 def on_progress(p: IngestionProgress):
-                    _ingest_jobs[job_id]["message"] = f"{p.stage}: {p.message or ''}"
+                    with _ingest_jobs_lock:
+                        _ingest_jobs[job_id]["message"] = f"{p.stage}: {p.message or ''}"
 
                 kwargs = dict(name=name, topic=topic, subtopic=subtopic, on_progress=on_progress)
 
@@ -496,14 +516,16 @@ def _register_tools(mcp: FastMCP) -> None:
                 else:
                     chunks = await asyncio.to_thread(ingester.ingest_file, path=source, **kwargs)
 
-                _ingest_jobs[job_id]["status"] = "done"
-                _ingest_jobs[job_id]["chunks"] = chunks
-                _ingest_jobs[job_id]["message"] = f"Ingested {chunks} chunks"
+                with _ingest_jobs_lock:
+                    _ingest_jobs[job_id]["status"] = "done"
+                    _ingest_jobs[job_id]["chunks"] = chunks
+                    _ingest_jobs[job_id]["message"] = f"Ingested {chunks} chunks"
 
             except Exception as e:
-                _ingest_jobs[job_id]["status"] = "error"
-                _ingest_jobs[job_id]["error"] = str(e)
-                _ingest_jobs[job_id]["message"] = f"Failed: {e}"
+                with _ingest_jobs_lock:
+                    _ingest_jobs[job_id]["status"] = "error"
+                    _ingest_jobs[job_id]["error"] = str(e)
+                    _ingest_jobs[job_id]["message"] = f"Failed: {e}"
 
         global _ingest_queue, _ingest_worker_started
         if _ingest_queue is None:
@@ -536,15 +558,17 @@ def _register_tools(mcp: FastMCP) -> None:
         and chunk count when complete.
         """
         if job_id:
-            job = _ingest_jobs.get(job_id)
-            if not job:
-                return {"success": False, "error": f"Unknown job: {job_id}"}
-            return {"success": True, "job_id": job_id, **job}
+            with _ingest_jobs_lock:
+                job = _ingest_jobs.get(job_id)
+                if not job:
+                    return {"success": False, "error": f"Unknown job: {job_id}"}
+                return {"success": True, "job_id": job_id, **dict(job)}
 
-        return {
-            "success": True,
-            "jobs": {jid: j for jid, j in _ingest_jobs.items()},
-        }
+        with _ingest_jobs_lock:
+            return {
+                "success": True,
+                "jobs": {jid: dict(j) for jid, j in _ingest_jobs.items()},
+            }
 
     # ── rate_result ──────────────────────────────────────────────────
 
@@ -563,7 +587,7 @@ def _register_tools(mcp: FastMCP) -> None:
             db = get_database()
             db.rate_chunk(chunk_id, useful)
             db.log_interaction(
-                session_id=_session_id, action="rate",
+                session_id=_default_session_id, action="rate",
                 chunk_ids_rated=[chunk_id],
                 rating=1 if useful else -1,
             )

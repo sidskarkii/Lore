@@ -46,9 +46,13 @@ def _rerank_with_scores(query: str, candidates: list[dict], n: int) -> list[tupl
     if ranker is None:
         return [(c, 1.0) for c in candidates[:n]]
 
-    passages = [{"id": str(i), "text": c["text"]} for i, c in enumerate(candidates)]
-    reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
-    return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
+    try:
+        passages = [{"id": str(i), "text": c["text"]} for i, c in enumerate(candidates)]
+        reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
+        return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
+    except Exception as e:
+        print(f"  [search] Reranker failed, using RRF order: {e}")
+        return [(c, 1.0) for c in candidates[:n]]
 
 
 def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:

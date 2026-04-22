@@ -408,8 +408,9 @@ class Ingester:
                     total_items=len(files), completed_items=i - 1,
                 ))
             try:
+                file_name = f"{name} - {doc_file.stem}"
                 n = self.ingest_file(
-                    path=str(doc_file), name=name, topic=topic, subtopic=subtopic,
+                    path=str(doc_file), name=file_name, topic=topic, subtopic=subtopic,
                     enrich=True,
                 )
                 total_chunks += n
