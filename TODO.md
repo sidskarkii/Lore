@@ -37,7 +37,9 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 - [ ] Search returns all compact by default; agent selectively expands individual results (current compact/expand model but with pagination on expand side)
 
 ### Session Intelligence
-- [ ] Session-aware search — combo approach: (1) deprioritize seen chunks by 50% score penalty instead of filtering (avoids losing top results after agent compaction), (2) TTL-based re-eligibility (chunks become full-score again after N minutes), (3) `reset_session` param for agent to signal compaction happened
+- [x] Session-aware search — deprioritize already-fetched chunks by 50% score penalty (not filtered, still findable). Queries interaction log for session's fetched chunk IDs
+- [ ] TTL-based re-eligibility (chunks become full-score again after N minutes)
+- [ ] `reset_session` param for agent to signal compaction happened
 - [ ] "Related" section in search results — Rocchio + MMR recommendations shown separately from main results, clearly labeled with WHY ("similar to chunks you read about X and Y"). Main results stay unbiased, related section adds session-informed suggestions
 - [ ] Implicit feedback via Rocchio + MMR — maintain centroid of fetched-chunk embeddings per session, retrieve nearest neighbors, rerank with MMR (lambda ~0.7) to ensure diversity. Prevents echo chamber while keeping relevance. Use ONLY for the "related" section, never bias main results
 - [ ] Future: chunk co-occurrence patterns from session logs — learn which chunks get fetched together across sessions as blended signal for recommendations

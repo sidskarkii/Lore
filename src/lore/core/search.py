@@ -192,6 +192,7 @@ class SearchEngine:
         topic: str | None = None,
         subtopic: str | None = None,
         expand: bool = True,
+        session_id: str | None = None,
     ) -> list[dict]:
         cfg = self._cfg
         candidate_count = cfg.get("search.candidate_count", 30)
@@ -253,7 +254,22 @@ class SearchEngine:
         # 6. Rating + importance boost
         results = _apply_rating_boost(results)
 
-        # 7. Parent window expansion
+        # 7. Session-aware deprioritization
+        if session_id:
+            try:
+                from .database import get_database
+                fetched_ids = get_database().get_session_fetched_ids(session_id)
+            except Exception:
+                fetched_ids = set()
+
+            if fetched_ids:
+                for r in results:
+                    if r.get("id") in fetched_ids:
+                        r["_score"] = r.get("_score", 0) * 0.5
+                results.sort(key=lambda r: r.get("_score", 0), reverse=True)
+                print(f"  [search] session:      {len(fetched_ids)} fetched, deprioritized")
+
+        # 8. Parent window expansion
         if expand:
             results = [self._expand_to_parent(r) for r in results]
         t6 = time.perf_counter()

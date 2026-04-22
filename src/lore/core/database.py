@@ -372,6 +372,22 @@ class Database:
         ).fetchall()
         return {row["chunk_id"]: dict(row) for row in rows}
 
+    def get_session_fetched_ids(self, session_id: str) -> set[str]:
+        """Get all chunk IDs fetched via get_context in a session."""
+        rows = self._conn.execute(
+            "SELECT chunk_ids_fetched FROM interactions "
+            "WHERE session_id = ? AND action = 'get_context'",
+            (session_id,),
+        ).fetchall()
+        result = set()
+        for row in rows:
+            if row["chunk_ids_fetched"]:
+                try:
+                    result.update(json.loads(row["chunk_ids_fetched"]))
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return result
+
     def get_interaction_stats(self) -> dict:
         total = self._conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
         sessions = self._conn.execute("SELECT COUNT(DISTINCT session_id) FROM interactions").fetchone()[0]

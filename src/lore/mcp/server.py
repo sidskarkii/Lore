@@ -205,6 +205,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 topic=topic,
                 subtopic=subtopic,
                 expand=expand and not compact,
+                session_id=_default_session_id,
             )
             formatter = _format_compact_result if compact else _format_result
             formatted = [formatter(r) for r in results]
