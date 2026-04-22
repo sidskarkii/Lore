@@ -146,6 +146,7 @@ For each passage, return a JSON array with one object per passage containing:
 - "title": Concise title (3-8 words) capturing the main point
 - "summary": 1-2 sentence summary of what this passage says
 - "tags": Array of 3-6 tags (lowercase, hyphens, no spaces) for topic categorization
+- "concept_tags": Array of 2-5 specific concept tags that describe the IDEAS in this passage. These must be specific enough to connect similar ideas across different books. NOT generic topics — specific concepts. Examples: "deception-as-advantage", "reciprocity-principle", "information-asymmetry", "leader-discipline-relationship", "ego-driven-failure". Think: if another book discusses the same concept, would this tag match?
 - "importance": Integer 1-5 rating how central this passage is to the chapter's argument (5=core thesis, 1=tangential)
 - "semantic_key": 2-5 word subtopic identifier
 
@@ -314,6 +315,7 @@ def enrich_chunks_stage2(
                 chunk["title"] = enrichment.get("title", "")
                 chunk["summary"] = enrichment.get("summary", "")
                 chunk["keywords"] = ", ".join(enrichment.get("tags", []))
+                chunk["concept_tags"] = ", ".join(enrichment.get("concept_tags", []))
                 chunk["importance"] = int(enrichment.get("importance", 3))
                 chunk["semantic_key"] = enrichment.get("semantic_key", "")
         except Exception as e:
@@ -336,6 +338,7 @@ def enrich_chunks_stage2(
                     chunk["title"] = enrichment.get("title", "")
                     chunk["summary"] = enrichment.get("summary", "")
                     chunk["keywords"] = ", ".join(enrichment.get("tags", []))
+                    chunk["concept_tags"] = ", ".join(enrichment.get("concept_tags", []))
                     chunk["importance"] = int(enrichment.get("importance", 3))
                     chunk["semantic_key"] = enrichment.get("semantic_key", "")
             except Exception as e:
@@ -350,60 +353,47 @@ def enrich_section_stage3(
     book_title: str = "",
     section_name: str = "",
     calls_per_min: float = 7.5,
+    on_progress=None,
 ) -> dict:
-    """Stage 3: Section/chapter summary via progressive passes over original text."""
+    """Stage 3: Section/chapter summary via progressive passes over original text.
+
+    Always uses progressive passes regardless of section size — consistent
+    chunked output, running summary builds incrementally.
+    """
     min_interval = 60.0 / calls_per_min
 
-    total_tokens = sum(len(c.get("text", "")) // 4 for c in section_chunks)
-
-    if total_tokens <= _MAX_TOKENS_PER_PASS:
-        section_text = "\n\n".join(c["text"] for c in section_chunks)
-        prompt = _SECTION_SUMMARY_PROMPT.format(
-            book_title=book_title or "Unknown",
-            section_name=section_name,
-            section_text=section_text,
-        )
-        try:
-            response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
-            return _extract_json(response) if isinstance(_extract_json(response), dict) else _extract_json(response)[0]
-        except Exception as e:
-            print(f"  [stage3] Section summary failed: {e}")
-            return {"summary": "", "key_concepts": [], "key_entities": []}
-
-    running_summary = "No summary yet — this is the first pass."
-    chunk_titles = []
-
-    tokens_so_far = 0
-    batch_chunks = []
+    batches: list[list[dict]] = []
+    current_batch: list[dict] = []
+    current_tokens = 0
     for c in section_chunks:
         ct = len(c.get("text", "")) // 4
-        if tokens_so_far + ct > _MAX_TOKENS_PER_PASS and batch_chunks:
-            chunks_text = "\n\n".join(bc["text"] for bc in batch_chunks)
-            prompt = _SECTION_PROGRESSIVE_PROMPT.format(
-                book_title=book_title or "Unknown",
-                section_name=section_name,
-                running_summary=running_summary,
-                chunks=chunks_text,
-            )
-            try:
-                time.sleep(min_interval)
-                response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
-                result = _extract_json(response)
-                if isinstance(result, list):
-                    result = result[0]
-                running_summary = result.get("running_summary", running_summary)
-                chunk_titles.extend(result.get("chunk_titles", []))
-            except Exception as e:
-                print(f"  [stage3] Progressive pass failed: {e}")
+        if current_tokens + ct > _MAX_TOKENS_PER_PASS and current_batch:
+            batches.append(current_batch)
+            current_batch = []
+            current_tokens = 0
+        current_batch.append(c)
+        current_tokens += ct
+    if current_batch:
+        batches.append(current_batch)
 
-            batch_chunks = []
-            tokens_so_far = 0
+    total_passes = len(batches)
+    print(f"  [stage3] Section '{section_name}': {total_passes} passes over {len(section_chunks)} chunks")
 
-        batch_chunks.append(c)
-        tokens_so_far += ct
+    running_summary = "No summary yet — this is the first pass."
+    all_key_concepts = []
+    all_key_entities = []
+    chunk_titles = []
+    failed_passes: list[tuple[int, list[dict]]] = []
 
-    if batch_chunks:
-        chunks_text = "\n\n".join(bc["text"] for bc in batch_chunks)
+    for i, batch in enumerate(batches):
+        if on_progress:
+            on_progress(section_name, i + 1, total_passes)
+
+        elapsed = time.time() - (getattr(enrich_section_stage3, '_last_call', 0))
+        if i > 0 and elapsed < min_interval:
+            time.sleep(min_interval - elapsed)
+
+        chunks_text = "\n\n".join(bc["text"] for bc in batch)
         prompt = _SECTION_PROGRESSIVE_PROMPT.format(
             book_title=book_title or "Unknown",
             section_name=section_name,
@@ -411,20 +401,45 @@ def enrich_section_stage3(
             chunks=chunks_text,
         )
         try:
-            time.sleep(min_interval)
+            enrich_section_stage3._last_call = time.time()
             response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
             result = _extract_json(response)
             if isinstance(result, list):
                 result = result[0]
             running_summary = result.get("running_summary", running_summary)
             chunk_titles.extend(result.get("chunk_titles", []))
+            for concept in result.get("key_concepts", []):
+                if concept not in all_key_concepts:
+                    all_key_concepts.append(concept)
         except Exception as e:
-            print(f"  [stage3] Final pass failed: {e}")
+            print(f"  [stage3] Pass {i+1}/{total_passes} failed: {e}")
+            failed_passes.append((i, batch))
+
+    if failed_passes:
+        print(f"  [stage3] Retrying {len(failed_passes)} failed passes...")
+        for pass_idx, batch in failed_passes:
+            time.sleep(min_interval)
+            chunks_text = "\n\n".join(bc["text"] for bc in batch)
+            prompt = _SECTION_PROGRESSIVE_PROMPT.format(
+                book_title=book_title or "Unknown",
+                section_name=section_name,
+                running_summary=running_summary,
+                chunks=chunks_text,
+            )
+            try:
+                response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
+                result = _extract_json(response)
+                if isinstance(result, list):
+                    result = result[0]
+                running_summary = result.get("running_summary", running_summary)
+                chunk_titles.extend(result.get("chunk_titles", []))
+            except Exception as e:
+                print(f"  [stage3] Retry pass {pass_idx+1} failed again: {e}")
 
     return {
         "summary": running_summary,
-        "key_concepts": [],
-        "key_entities": [],
+        "key_concepts": all_key_concepts,
+        "key_entities": all_key_entities,
         "chunk_titles": chunk_titles,
     }
 

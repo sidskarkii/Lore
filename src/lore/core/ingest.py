@@ -532,8 +532,17 @@ class Ingester:
                     sections_by_heading.setdefault(heading, []).append(c)
 
                 section_summaries = []
-                for heading, sec_chunks in sections_by_heading.items():
-                    result = enrich_section_stage3(sec_chunks, provider, book_title=book_title, section_name=heading)
+                total_sections = len(sections_by_heading)
+                for sec_idx, (heading, sec_chunks) in enumerate(sections_by_heading.items()):
+                    def _sec_progress(sec_name, pass_num, total_passes):
+                        if on_progress:
+                            on_progress(IngestionProgress(
+                                stage="enriching",
+                                progress=0.6 + 0.1 * ((sec_idx + pass_num / max(total_passes, 1)) / max(total_sections, 1)),
+                                current_item=item_name, total_items=1, completed_items=0,
+                                message=f"Stage 3: section {sec_idx+1}/{total_sections} '{sec_name}' pass {pass_num}/{total_passes}...",
+                            ))
+                    result = enrich_section_stage3(sec_chunks, provider, book_title=book_title, section_name=heading, on_progress=_sec_progress)
                     section_summaries.append({"section": heading, **result})
 
                 if on_progress:

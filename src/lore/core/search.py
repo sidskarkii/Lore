@@ -125,7 +125,10 @@ def _entity_rank(candidates: list[dict], query_entities: set[str]) -> list[str]:
         kw_raw = c.get("keywords", "")
         chunk_keywords = {k.strip().lower() for k in kw_raw.split(",")} if kw_raw else set()
 
-        overlap = len(query_entities & (chunk_entities | chunk_keywords))
+        ct_raw = c.get("concept_tags", "")
+        chunk_concepts = {k.strip().lower() for k in ct_raw.split(",")} if ct_raw else set()
+
+        overlap = len(query_entities & (chunk_entities | chunk_keywords | chunk_concepts))
         scored.append((c["id"], overlap))
 
     scored.sort(key=lambda x: -x[1])

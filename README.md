@@ -1,191 +1,158 @@
 # Lore
 
-A local-first knowledge base that turns videos, documents, and playlists into a searchable, chat-ready library. You feed it content (YouTube videos, local files, PDFs, web pages) and it transcribes, chunks, embeds, and indexes everything. Then you search or chat with it and get source-grounded answers that link back to exact timestamps in the original material.
+A local-first knowledge base that AI agents plug into via MCP. Feed it books, documents, videos, code, and web pages. It extracts, chunks, enriches, and indexes everything. Agents search it, browse it, and get smarter over time through interaction logging and relevance feedback.
 
-## What it does
+Not a wrapper around a vector DB. A multi-stage enrichment pipeline that produces chunk titles, section summaries, book overviews, concept tags, and importance scores. Every search result carries enough metadata for an agent to decide what to read without reading it.
 
-**Ingest** any combination of:
-- YouTube videos and playlists
-- Local video/audio files (mp4, mkv, webm, etc.)
-- Documents (PDF, EPUB, Markdown, plain text)
-- Source code (Python, JS, Go, Rust, etc.)
-- Web pages
-
-**Search** using hybrid retrieval:
-- Vector similarity (EmbeddingGemma-300M, ONNX)
-- Full-text search (BM25 via SQLite FTS5)
-- Reciprocal Rank Fusion to merge both result sets
-- Cross-encoder reranking (FlashRank) for final ordering
-- Multi-hop decomposition for complex questions
-
-**Chat** with your knowledge base:
-- RAG pipeline retrieves relevant chunks before answering
-- Responses cite sources with timestamps you can click
-- Streaming via Server-Sent Events
-- Persistent chat sessions stored in SQLite
-
-**Use any LLM** you want:
-- Ollama, LM Studio, or any OpenAI-compatible endpoint
-- OpenRouter for cloud models
-- Local GGUF files via llama-cpp-python
-- Switch providers from the UI without restarting
-
-## Architecture
+## How it works
 
 ```
-React + Tauri (desktop app)
-        |
-        | HTTP / SSE
-        v
-FastAPI (Python backend, port 8000)
-        |
-        +-- Embedding:     EmbeddingGemma-300M via ONNX Runtime (no PyTorch)
-        +-- Vector store:  LanceDB
-        +-- Reranker:      FlashRank (ms-marco-MiniLM-L-12-v2)
-        +-- Sessions:      SQLite with WAL mode
-        +-- Transcription:  faster-whisper (optional)
-        +-- LLM:           pluggable provider system
+Agent (Claude Code, Cursor, etc.)
+    |
+    | MCP (stdio or HTTP)
+    v
+Lore MCP Server
+    |
+    +-- Search:       vector + BM25 + entity boost + cross-encoder reranking
+    +-- Embedding:    EmbeddingGemma-300M (ONNX, no PyTorch for inference)
+    +-- Enrichment:   KeyBERT + spaCy NER + multi-stage LLM pipeline
+    +-- Vector store: LanceDB at ~/.lore/store/
+    +-- Metadata:     SQLite at ~/.lore/app.db (interactions, ratings)
+    +-- Archive:      ~/.lore/archive/ (per-source extracted text + enrichment)
 ```
-
-The backend does all the heavy lifting. The frontend is a React app wrapped in Tauri for a native desktop experience. In development you can also just run the frontend in a browser.
-
-## Project structure
-
-```
-src/lore/
-    api/            FastAPI routes (chat, search, ingest, sessions, providers, etc.)
-    core/           Business logic (embedding, chunking, search, ingestion, transcription)
-    providers/      LLM provider implementations (custom, local GGUF, etc.)
-
-ui/
-    src/            React + TypeScript frontend
-    src-tauri/      Tauri (Rust) desktop wrapper
-```
-
-## Prerequisites
-
-- Python 3.10+
-- Node.js 18+
-- An LLM provider (Ollama running locally is the easiest option)
-
-For video transcription (optional):
-- ffmpeg installed and on PATH
-
-For the desktop app (optional):
-- Rust toolchain (rustup)
 
 ## Setup
 
-### Backend
-
 ```bash
-cd tutorialvault
-
-# Create a virtual environment
+# Clone and install
+git clone https://github.com/sidskarkii/Lore.git
+cd Lore
 python -m venv .venv
-source .venv/bin/activate    # on Windows: .venv\Scripts\activate
+source .venv/bin/activate
+pip install -e ".[enrich]"
+python -m spacy download en_core_web_sm
 
-# Install core dependencies
-pip install -e .
+# (Optional) Set up an LLM provider for enrichment
+# Create .env in project root:
+echo "LORE_CUSTOM_API_KEY=your-openrouter-key" > .env
 
-# (Optional) Install transcription support
-pip install -e ".[transcribe]"
-
-# (Optional) Install local GGUF model support
-pip install -e ".[local]"
+# Register with Claude Code
+claude mcp add lore -- $(pwd)/.venv/bin/python -m lore --mcp-stdio
 ```
 
-On first run, the embedding model (~188MB) and reranker (~34MB) are downloaded automatically from HuggingFace.
+On first run, the embedding model (~188MB) and reranker (~34MB) download automatically from HuggingFace.
 
-### Frontend
+Enrichment works without an LLM provider (keywords and entities via KeyBERT + spaCy). Add an OpenRouter API key for full enrichment (titles, summaries, concept tags, section summaries, book overviews).
 
-```bash
-cd ui
-npm install
+## MCP tools
+
+| Tool | What it does |
+|------|-------------|
+| `search` | Hybrid retrieval. Compact results by default (metadata only). Entity-boosted via NER |
+| `search_deep` | Multi-hop: decomposes complex queries into sub-queries via LLM |
+| `get_context` | Paginated expansion around a search result. Agent controls page size |
+| `get_toc` | Table of contents for a collection. Sections with chunk counts and token estimates |
+| `ingest` | Non-blocking. Queues the job, returns a job ID immediately |
+| `ingest_status` | Check progress: "Stage 2: chunk titles batch 3/7 (0 cached)" |
+| `list_collections` | What's indexed, with topics and episode counts |
+| `delete_collection` | Remove a collection |
+| `rate_result` | Explicit feedback. Improves future rankings over time |
+| `health` | Server status, chunk count, active models |
+
+## Enrichment pipeline
+
+Ingestion runs a multi-stage pipeline. Each stage gets original text, not distilled-from-distilled.
+
+**Stage 1 -- Classical ML (no LLM)**
+Keywords via KeyBERT, named entities via spaCy NER.
+
+**Stage 2 -- Chunk-level enrichment (LLM)**
+Title, summary, topic tags, concept tags, importance score (1-5). Prompt includes book title, section heading, and chapter name for context.
+
+Concept tags are specific enough to bridge across books: `deception-as-advantage`, `reciprocity-principle`, `perception-control`. These power cross-source discovery.
+
+**Stage 3 -- Section summaries (LLM)**
+Progressive passes over full original text (5000 tokens per pass with running summary). Produces section summary, key concepts, key entities.
+
+**Stage 4 -- Book summary (LLM)**
+Reads all section summaries + table of contents. Produces overview, main themes, key takeaways, book-level tags.
+
+All enrichment is archived per-source at `~/.lore/archive/{collection}/` with `meta.json`, `extracted.md`, `chunks.json`, `section_summaries.json`, and `book_summary.json`.
+
+## Search
+
+Hybrid retrieval pipeline:
+1. Vector similarity (EmbeddingGemma-300M, ONNX)
+2. BM25 full-text search (LanceDB FTS)
+3. Entity-boosted ranking (spaCy extracts entities from query, matches against stored entities + keywords + concept tags)
+4. Reciprocal Rank Fusion merges all three signals
+5. Cross-encoder reranking (FlashRank ms-marco-MiniLM-L-12-v2)
+
+Results are compact by default: chunk ID, score, token count, title, summary, concept tags, importance, location. No full text unless requested. Agent scans metadata, fetches what it needs via `get_context`.
+
+## Chunk IDs
+
+Every token in a chunk ID is meaningful:
+
+| Source | Example |
+|--------|---------|
+| EPUB | `ego_is_the_enemy_ch_the_painful_prologue_0004` |
+| PDF | `the_art_of_war_i_laying_plans_0005` |
+| Video | `blender_tutorial_uv_unwrapping_basics_t04m32s` |
+| Code | `lore_codebase_src_lore_core_search_py_L45-90` |
+| Web | `karpathy_wiki_career_and_research_0002` |
+
+## Data
+
+All data lives at `~/.lore/` (override with `LORE_DATA_DIR` env var):
+
+```
+~/.lore/
+    store/          LanceDB vector store
+    archive/        Per-source: meta.json, extracted.md, chunks.json, summaries
+    app.db          SQLite (interaction logs, chunk ratings)
 ```
 
-### LLM provider
+Archive means you can wipe the vector store and rebuild from archived enrichment without re-calling LLMs.
 
-The easiest way to get started is with Ollama:
+## Configuration
 
-```bash
-# Install Ollama (https://ollama.com), then:
-ollama pull llama3.2
-```
+`config.yaml` in the project root has defaults for embedding, chunking, search, and transcription.
 
-Then create a `config.local.yaml` in the project root:
+`config.local.yaml` (gitignored) for provider overrides:
 
 ```yaml
 provider:
   active: custom
   custom:
-    base_url: http://localhost:11434/v1
-    api_key: ollama
-    model: llama3.2
+    base_url: https://openrouter.ai/api/v1
+    model: openai/gpt-oss-120b:free
 ```
 
-This file is gitignored. You can point it at any OpenAI-compatible API (OpenRouter, LM Studio, vLLM, etc.) by changing the base_url, api_key, and model.
+Or use environment variables: `LORE_CUSTOM_BASE_URL`, `LORE_CUSTOM_API_KEY`, `LORE_CUSTOM_MODEL`.
+
+Works with any OpenAI-compatible API: OpenRouter, Ollama, LM Studio, Together, Groq.
 
 ## Running
 
-Start both the backend and frontend:
-
+**As MCP server (recommended):**
 ```bash
-# Terminal 1: backend
-source .venv/bin/activate
+claude mcp add lore -- /path/to/Lore/.venv/bin/python -m lore --mcp-stdio
+```
+Auto-starts when the agent connects. Zero manual server management.
+
+**As HTTP server (for multi-agent or remote access):**
+```bash
 python -m lore
-# API runs on http://127.0.0.1:8000
-# Docs at http://127.0.0.1:8000/api/docs
-
-# Terminal 2: frontend (browser mode)
-cd ui
-npm run dev
-# Opens on http://localhost:1420
+# MCP endpoint at http://localhost:52105/mcp
 ```
-
-To run as a desktop app instead:
-
-```bash
-cd ui
-npm run tauri dev
-```
-
-## Usage
-
-1. Open the app in your browser (localhost:1420) or as a desktop app
-2. Go to the "Add" tab in the sidebar
-3. Ingest some content: paste a YouTube URL, point it at a folder of videos, or upload documents
-4. Switch to the "Chat" tab and ask questions about your content
-5. Click on source citations to jump to the exact timestamp or section
-
-## API
-
-The backend exposes a REST API. Full interactive docs are available at `/api/docs` when the server is running.
-
-Key endpoints:
-
-```
-GET   /api/health              Server status and stats
-POST  /api/search              Hybrid search over indexed content
-POST  /api/chat/stream         Chat with streaming (SSE)
-POST  /api/ingest/youtube      Ingest a YouTube video or playlist
-POST  /api/ingest/file         Ingest a local file
-POST  /api/ingest/url          Ingest a web page
-GET   /api/collections         List all indexed collections
-GET   /api/sessions            List chat sessions
-GET   /api/providers           List available LLM providers
-```
-
-## Configuration
-
-`config.yaml` has the defaults for embedding, chunking, search, and transcription. You generally don't need to touch it.
-
-`config.local.yaml` is where you put provider credentials and overrides. It is not checked into git.
 
 ## Tech stack
 
-**Backend:** Python, FastAPI, LanceDB, ONNX Runtime, FlashRank, SQLite, faster-whisper
+Python, FastAPI, LanceDB, ONNX Runtime, FlashRank, SQLite, KeyBERT, spaCy, MCP SDK
 
-**Frontend:** React, TypeScript, Vite, Tailwind CSS, Zustand, Tauri
+Models (downloaded automatically): EmbeddingGemma-300M (ONNX, 188MB), ms-marco-MiniLM-L-12-v2 (34MB), all-MiniLM-L6-v2 (KeyBERT, 80MB), en_core_web_sm (spaCy, 12MB)
 
-**Models (downloaded automatically):** EmbeddingGemma-300M (ONNX, 188MB), ms-marco-MiniLM-L-12-v2 (34MB)
+## Target
+
+macOS, Apple Silicon (M1+), 8GB+ RAM

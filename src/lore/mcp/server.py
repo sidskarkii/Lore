@@ -123,7 +123,9 @@ def _format_result(r: dict) -> dict:
         "title": r.get("title", ""),
         "summary": r.get("summary", ""),
         "keywords": r.get("keywords", ""),
+        "concept_tags": r.get("concept_tags", ""),
         "entities": r.get("entities", ""),
+        "importance": r.get("importance", 3),
         "semantic_key": r.get("semantic_key", ""),
     }
     result.update(_source_location(r))
@@ -143,6 +145,8 @@ def _format_compact_result(r: dict) -> dict:
         "title": r.get("title", ""),
         "summary": r.get("summary", ""),
         "keywords": r.get("keywords", ""),
+        "concept_tags": r.get("concept_tags", ""),
+        "importance": r.get("importance", 3),
     }
     result.update(_source_location(r))
     return result
