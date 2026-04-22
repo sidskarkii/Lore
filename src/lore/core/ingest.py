@@ -75,7 +75,7 @@ class Ingester:
 
     # ── Archive ──────────────────────────────────────────────────────
 
-    def _save_archive(self, collection: str, doc, chunks: list[dict], meta: dict):
+    def _save_archive(self, collection: str, doc, chunks: list[dict], meta: dict, section_summaries=None, book_summary=None):
         """Save extracted text and enriched chunks to source-segregated archive."""
         archive_path = self._cfg.archive_dir / collection
         archive_path.mkdir(parents=True, exist_ok=True)
@@ -102,6 +102,11 @@ class Ingester:
             sc = {k: v for k, v in c.items() if k != "vector" and not k.startswith("_")}
             serializable_chunks.append(sc)
         (archive_path / "chunks.json").write_text(json.dumps(serializable_chunks, indent=2, default=str))
+
+        if section_summaries:
+            (archive_path / "section_summaries.json").write_text(json.dumps(section_summaries, indent=2, default=str))
+        if book_summary:
+            (archive_path / "book_summary.json").write_text(json.dumps(book_summary, indent=2, default=str))
 
         print(f"  [archive] Saved to {archive_path}")
 
@@ -469,7 +474,7 @@ class Ingester:
         on_progress: ProgressCallback = None,
     ) -> int:
         """Shared pipeline for file and URL ingestion: chunk -> enrich -> store."""
-        from .enrich import enrich_programmatic, enrich_llm
+        from .enrich import enrich_programmatic, enrich_chunks_stage2, enrich_section_stage3, enrich_book_stage4
         from ..providers.registry import get_registry
 
         collection = _sanitize(name)
@@ -501,15 +506,46 @@ class Ingester:
             chunks = enrich_programmatic(chunks)
 
             provider = get_registry().active
+            book_title = doc.metadata.get("book_title", doc.metadata.get("page_title", name))
+            section_summaries = []
+            book_summary = {}
             if provider:
                 def _llm_progress(batch_num, total_batches, cached):
                     if on_progress:
                         on_progress(IngestionProgress(
-                            stage="enriching", progress=0.5 + 0.2 * (batch_num / max(total_batches, 1)),
+                            stage="enriching", progress=0.5 + 0.1 * (batch_num / max(total_batches, 1)),
                             current_item=item_name, total_items=1, completed_items=0,
-                            message=f"LLM enrichment batch {batch_num}/{total_batches} ({cached} cached)...",
+                            message=f"Stage 2: chunk titles batch {batch_num}/{total_batches} ({cached} cached)...",
                         ))
-                chunks = enrich_llm(chunks, provider, on_progress=_llm_progress)
+                chunks = enrich_chunks_stage2(chunks, provider, book_title=book_title, on_progress=_llm_progress)
+
+                if on_progress:
+                    on_progress(IngestionProgress(
+                        stage="enriching", progress=0.65, current_item=item_name,
+                        total_items=1, completed_items=0,
+                        message="Stage 3: section summaries...",
+                    ))
+
+                sections_by_heading: dict[str, list[dict]] = {}
+                for c in chunks:
+                    heading = c.get("section_heading", "") or "(untitled)"
+                    sections_by_heading.setdefault(heading, []).append(c)
+
+                section_summaries = []
+                for heading, sec_chunks in sections_by_heading.items():
+                    result = enrich_section_stage3(sec_chunks, provider, book_title=book_title, section_name=heading)
+                    section_summaries.append({"section": heading, **result})
+
+                if on_progress:
+                    on_progress(IngestionProgress(
+                        stage="enriching", progress=0.7, current_item=item_name,
+                        total_items=1, completed_items=0,
+                        message="Stage 4: book summary...",
+                    ))
+
+                toc = [s["section"] for s in section_summaries]
+                author = doc.metadata.get("author", "")
+                book_summary = enrich_book_stage4(section_summaries, provider, book_title=book_title, author=author, toc=toc)
 
         meta = {
             "collection": collection,
@@ -529,7 +565,9 @@ class Ingester:
                 total_items=1, completed_items=0,
                 message="Saving to archive...",
             ))
-        self._save_archive(collection, doc, chunks, meta)
+        self._save_archive(collection, doc, chunks, meta,
+                           section_summaries=section_summaries if provider else None,
+                           book_summary=book_summary if provider else None)
 
         if on_progress:
             on_progress(IngestionProgress(
