@@ -7,7 +7,7 @@
 - [ ] System prompt rework for RAG harness
 
 ## Source Structure & Navigation
-- [ ] Domain-specific chunk IDs and hierarchy: books use part/chapter/section (e.g. `pt01_ch03_s005`), videos keep episode/timestamp, code uses file/symbol. get_context understands the source's natural structure ("next chapter", "this part") instead of raw index offsets
+- [x] Domain-specific chunk IDs: EPUB {name}_ch_{chapter}_{passage}, PDF {name}_{section}_p{page}_{passage}, video {name}_{ep}_t{MM}m{SS}s, code {name}_{path}_L{range}, web {name}_{section}_{passage}. get_context reads metadata from store (no regex parsing)
 - [ ] Video chapter extraction: pull YouTube chapters from description metadata (yt-dlp), store as chapter field on video chunks so compact results show section names instead of bare timestamps
 - [ ] Auto-generated section labels: LLM enrichment detects topic shifts in videos without chapters, assigns section names during enrichment pass
 
@@ -66,14 +66,38 @@ Synthesized knowledge layer on top of raw chunks. Classical ML finds connections
 - [ ] **Wiki search** — agent can search raw chunks OR wiki pages. Wiki pages surface synthesized knowledge, raw chunks surface source material
 - [ ] **Incremental wiki updates** — new source ingested triggers updates to existing concept/entity pages, not just creation of new ones
 
-## Smart Model Routing
-Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for simple tasks, big models for complex ones.
-- [ ] Task-based routing config in config.yaml: `routing.summarize`, `routing.synthesize`, `routing.reason`, `routing.default`
-- [ ] Small model for chunk summaries/titles/tags (e.g. `gemma-3-4b-it:free` — fast, good enough)
-- [ ] Big model for concept page synthesis, entity consolidation, contradiction detection (e.g. `gpt-oss-120b:free` or `nemotron-3-super-120b`)
-- [ ] Fallback chain: if preferred model is rate-limited, try next in list
-- [ ] Token/cost tracking per task type for monitoring which routes are expensive
-- [ ] Local model override: when Ollama is available, route simple tasks to local Gemma 4 E4B instead of API
+## Enrichment Workflow (multi-stage pipeline)
+Each stage gets ORIGINAL text — no telephone game. Earlier stages produce metadata that helps organize what later stages see, but never replace source material. All stages must work with MCP sampling (harness model) as default, external providers optional.
+
+### Stage design
+- [x] **Stage 1: Classical ML** — KeyBERT keywords + spaCy NER entities. No LLM. Already built
+- [x] **Stage 2: Chunk-level enrichment** — titles, tags, importance (1-5), semantic_key. Prompt includes book title + section heading + chapter name for context. 5 chunks per batch. Built and working
+- [x] **Stage 3: Section/chapter summaries** — model gets FULL section text (original material). Progressive passes for large sections: 5000 tok/pass + running summary from previous pass. Built, needs retry on failed sections
+- [x] **Stage 4: Book-level summary** — model gets all section summaries + TOC + book metadata. Overview, themes, takeaways, tags. Built and working
+- [ ] **Stage 5: Cross-source connection tagging** — classical ML finds candidate connections (unlinked similar chunks), LLM reviews candidates and adds bridging tags where real connections exist. Tags become connection graph edges. Unattached chunks get additional tags to link them
+
+### Stage improvements needed
+- [ ] Always chunked output — even if section fits in context, consistent 5000 tok passes for predictable behavior
+- [ ] Same session/conversation thread for continuity across progressive passes within a section
+- [ ] Importance scores feeding into search ranking — high importance chunks get score boost
+- [ ] Per-section progress reporting in stage 3 (currently just "Stage 3: section summaries..." with no section-level detail)
+- [ ] Retry failed sections in stage 3 (currently silently returns empty)
+- [ ] Stage 2 context enhancement: include surrounding chunk keywords/entities to give the model more awareness of neighboring content
+
+### MCP sampling integration
+- [ ] MCP sampling as DEFAULT for all stages — harness model does the enrichment, zero config, no API key needed
+- [ ] External provider (OpenRouter etc) as optional upgrade, not requirement
+- [ ] Fallback chain: try sampling first → configured provider → skip LLM enrichment (keywords/entities only from stage 1)
+- [ ] Must work entirely without external provider (sampling-only mode for zero-config users)
+
+### Model routing (within external provider path)
+- [ ] Task-based routing config: each stage can specify preferred model
+- [ ] Small model for stage 2 chunk titles (e.g. gemma-3-4b — fast, good enough with proper context)
+- [ ] Big model for stages 3-5 synthesis (e.g. gpt-oss-120b or nemotron-120b)
+- [x] Moderation fallback: 403 content block auto-falls back to nemotron (no content filter). Handles military/strategy/psychology books
+- [ ] Rate limit fallback: 429 tries next model in chain before backing off
+- [ ] Local model override: when Ollama available, route stages to local Gemma 4 E4B
+- [ ] Token/cost tracking per stage for monitoring
 
 ## Search
 - [ ] Incremental FTS index updates instead of full rebuild on every ingest
@@ -103,8 +127,12 @@ Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for s
 - [ ] Ingestion resume: track completed episodes so crashed ingests can resume
 
 ## Enrichment
-- [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings)
+- [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings) — compare quality first before replacing
 - [x] Robust JSON extraction for LLM enrichment — sanitize control chars, regex fallback for malformed responses
+- [x] Enrichment cache by content hash — skip LLM for already-enriched chunks on re-ingest
+- [x] Rate limiting (7.5 calls/min) + exponential backoff on 429s
+- [x] Retry queue — failed batches re-attempted after first pass
+- [x] Singleton model loading — KeyBERT + spaCy load once, not per ingestion
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
 ## Provider & Configuration
@@ -119,6 +147,18 @@ Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for s
 - [ ] Local enrichment model — Gemma 4 E4B via Ollama (~5GB Q4, ~40-60 tok/s on M1, native JSON output). Runner-up: Qwen 3.5 4B (~2.5GB, faster). Replace OpenRouter enrichment calls with local inference for fully offline pipeline
 
 ## Done
+- [x] Multi-stage enrichment pipeline (stages 1-4: classical ML → chunk titles → section summaries → book summary)
+- [x] Moderation fallback (403 → nemotron-120b for military/strategy content)
+- [x] Global data dir (~/.lore/) with LORE_DATA_DIR override
+- [x] Source-segregated archive (meta.json, extracted.md, chunks.json, section_summaries.json, book_summary.json per source)
+- [x] Domain-specific chunk IDs (EPUB/PDF/video/code/web formats)
+- [x] PDF chapter pattern fallback + page number mapping for unstructured PDFs
+- [x] Async non-blocking ingestion with sequential queue + ingest_status with batch progress
+- [x] Interaction logging to SQLite (search/fetch/rate) + chunk_ratings table
+- [x] Enrichment cache, retry queue, rate limiting, singleton models
+- [x] EPUB spine-based extraction (fixes EPUB3 compatibility)
+- [x] Stdio as default MCP transport (auto-starts with harness)
+- [x] .env file support + dotenv loading + collection-level dedup
 - [x] Progressive disclosure: compact search results (metadata + scores + token_count, no text) with get_context for full fetch
 - [x] Token count estimates in search results
 - [x] Reranker scores passed through to MCP results
