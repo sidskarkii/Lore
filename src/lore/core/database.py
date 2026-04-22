@@ -21,6 +21,37 @@ from typing import Any
 
 from .config import get_config
 
+_INTERACTION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS interactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    timestamp TEXT NOT NULL,
+    action TEXT NOT NULL CHECK(action IN ('search', 'search_deep', 'get_context', 'get_toc', 'ingest', 'rate')),
+    query TEXT,
+    chunk_ids_shown TEXT,
+    chunk_ids_fetched TEXT,
+    chunk_ids_ignored TEXT,
+    chunk_ids_rated TEXT,
+    rating INTEGER,
+    metadata_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_interactions_session
+    ON interactions(session_id, timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_interactions_action
+    ON interactions(action, timestamp);
+
+CREATE TABLE IF NOT EXISTS chunk_ratings (
+    chunk_id TEXT PRIMARY KEY,
+    fetches INTEGER NOT NULL DEFAULT 0,
+    ignores INTEGER NOT NULL DEFAULT 0,
+    explicit_up INTEGER NOT NULL DEFAULT 0,
+    explicit_down INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS chat_sessions (
     id TEXT PRIMARY KEY,
@@ -93,6 +124,7 @@ class Database:
 
     def _init_schema(self):
         self._conn.executescript(_SCHEMA)
+        self._conn.executescript(_INTERACTION_SCHEMA)
         try:
             self._conn.executescript(_FTS_SCHEMA)
         except sqlite3.OperationalError:
@@ -256,6 +288,86 @@ class Database:
             (key, json.dumps(value), _now(), json.dumps(value), _now()),
         )
         self._conn.commit()
+
+
+    # ── Interaction Logging ────────────────────────────────────────────
+
+    def log_interaction(
+        self,
+        session_id: str,
+        action: str,
+        query: str | None = None,
+        chunk_ids_shown: list[str] | None = None,
+        chunk_ids_fetched: list[str] | None = None,
+        chunk_ids_ignored: list[str] | None = None,
+        chunk_ids_rated: list[str] | None = None,
+        rating: int | None = None,
+        metadata: dict | None = None,
+    ):
+        self._conn.execute(
+            "INSERT INTO interactions (session_id, timestamp, action, query, "
+            "chunk_ids_shown, chunk_ids_fetched, chunk_ids_ignored, chunk_ids_rated, "
+            "rating, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                session_id, _now(), action, query,
+                json.dumps(chunk_ids_shown) if chunk_ids_shown else None,
+                json.dumps(chunk_ids_fetched) if chunk_ids_fetched else None,
+                json.dumps(chunk_ids_ignored) if chunk_ids_ignored else None,
+                json.dumps(chunk_ids_rated) if chunk_ids_rated else None,
+                rating,
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+        self._conn.commit()
+
+        if chunk_ids_fetched:
+            self._update_chunk_ratings(chunk_ids_fetched, "fetch")
+        if chunk_ids_shown and chunk_ids_fetched:
+            ignored = set(chunk_ids_shown) - set(chunk_ids_fetched)
+            if ignored:
+                self._update_chunk_ratings(list(ignored), "ignore")
+
+    def _update_chunk_ratings(self, chunk_ids: list[str], signal: str):
+        now = _now()
+        for cid in chunk_ids:
+            if signal == "fetch":
+                self._conn.execute(
+                    "INSERT INTO chunk_ratings (chunk_id, fetches, ignores, updated_at) "
+                    "VALUES (?, 1, 0, ?) "
+                    "ON CONFLICT(chunk_id) DO UPDATE SET fetches = fetches + 1, updated_at = ?",
+                    (cid, now, now),
+                )
+            elif signal == "ignore":
+                self._conn.execute(
+                    "INSERT INTO chunk_ratings (chunk_id, fetches, ignores, updated_at) "
+                    "VALUES (?, 0, 1, ?) "
+                    "ON CONFLICT(chunk_id) DO UPDATE SET ignores = ignores + 1, updated_at = ?",
+                    (cid, now, now),
+                )
+        self._conn.commit()
+
+    def rate_chunk(self, chunk_id: str, useful: bool):
+        now = _now()
+        col = "explicit_up" if useful else "explicit_down"
+        self._conn.execute(
+            f"INSERT INTO chunk_ratings (chunk_id, fetches, ignores, {col}, updated_at) "
+            f"VALUES (?, 0, 0, 1, ?) "
+            f"ON CONFLICT(chunk_id) DO UPDATE SET {col} = {col} + 1, updated_at = ?",
+            (chunk_id, now, now),
+        )
+        self._conn.commit()
+
+    def get_chunk_rating(self, chunk_id: str) -> dict | None:
+        row = self._conn.execute(
+            "SELECT * FROM chunk_ratings WHERE chunk_id = ?", (chunk_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def get_interaction_stats(self) -> dict:
+        total = self._conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
+        sessions = self._conn.execute("SELECT COUNT(DISTINCT session_id) FROM interactions").fetchone()[0]
+        rated_chunks = self._conn.execute("SELECT COUNT(*) FROM chunk_ratings").fetchone()[0]
+        return {"total_interactions": total, "unique_sessions": sessions, "rated_chunks": rated_chunks}
 
 
 # Module-level singleton

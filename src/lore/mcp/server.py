@@ -24,11 +24,14 @@ from pydantic import Field
 
 from ..core.config import get_config
 from ..core.search import get_search_engine
+from ..core.database import get_database
 from ..core.store import get_store
 from ..providers.registry import get_registry
 
 _ingest_jobs: dict[str, dict] = {}
 _ingest_queue: asyncio.Queue | None = None
+_session_id = uuid.uuid4().hex[:12]
+_last_shown_ids: list[str] = []
 _ingest_worker_started = False
 
 
@@ -187,12 +190,24 @@ def _register_tools(mcp: FastMCP) -> None:
                 expand=expand and not compact,
             )
             formatter = _format_compact_result if compact else _format_result
+            formatted = [formatter(r) for r in results]
+
+            _last_shown_ids.clear()
+            _last_shown_ids.extend([f["chunk_id"] for f in formatted])
+            try:
+                get_database().log_interaction(
+                    session_id=_session_id, action="search",
+                    query=query, chunk_ids_shown=list(_last_shown_ids),
+                )
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "query": query,
                 "total": len(results),
                 "compact": compact,
-                "results": [formatter(r) for r in results],
+                "results": formatted,
             }
         except Exception as e:
             return {"success": False, "error": str(e), "query": query, "total": 0, "results": []}
@@ -238,12 +253,24 @@ def _register_tools(mcp: FastMCP) -> None:
                 subtopic=subtopic,
             )
             formatter = _format_compact_result if compact else _format_result
+            formatted = [formatter(r) for r in results]
+
+            _last_shown_ids.clear()
+            _last_shown_ids.extend([f["chunk_id"] for f in formatted])
+            try:
+                get_database().log_interaction(
+                    session_id=_session_id, action="search_deep",
+                    query=query, chunk_ids_shown=list(_last_shown_ids),
+                )
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "query": query,
                 "total": len(results),
                 "compact": compact,
-                "results": [formatter(r) for r in results],
+                "results": formatted,
             }
         except Exception as e:
             return {"success": False, "error": str(e), "query": query, "total": 0, "results": []}
@@ -359,6 +386,20 @@ def _register_tools(mcp: FastMCP) -> None:
             else:
                 chunks = all_chunks
                 total_pages = 1
+
+            fetched_ids = [c["chunk_id"] for c in chunks]
+            if chunk_id and chunk_id not in fetched_ids:
+                fetched_ids.append(chunk_id)
+            ignored_from_last = [cid for cid in _last_shown_ids if cid not in fetched_ids] if _last_shown_ids else []
+            try:
+                get_database().log_interaction(
+                    session_id=_session_id, action="get_context",
+                    chunk_ids_fetched=fetched_ids,
+                    chunk_ids_shown=list(_last_shown_ids) if _last_shown_ids else None,
+                    chunk_ids_ignored=ignored_from_last if ignored_from_last else None,
+                )
+            except Exception:
+                pass
 
             result = {
                 "success": True,
@@ -504,6 +545,31 @@ def _register_tools(mcp: FastMCP) -> None:
             "success": True,
             "jobs": {jid: j for jid, j in _ingest_jobs.items()},
         }
+
+    # ── rate_result ──────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def rate_result(
+        chunk_id: Annotated[str, Field(description="Chunk ID to rate.")],
+        useful: Annotated[bool, Field(description="True if the chunk was useful, false if not.")],
+    ) -> dict:
+        """Rate a search result as useful or not useful.
+
+        WHEN TO USE: After reading a chunk's full text, tell Lore whether
+        it was helpful. This improves future search rankings over time.
+        Explicit ratings count as strong signal.
+        """
+        try:
+            db = get_database()
+            db.rate_chunk(chunk_id, useful)
+            db.log_interaction(
+                session_id=_session_id, action="rate",
+                chunk_ids_rated=[chunk_id],
+                rating=1 if useful else -1,
+            )
+            return {"success": True, "chunk_id": chunk_id, "rated": "useful" if useful else "not useful"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # ── get_toc ──────────────────────────────────────────────────────
 

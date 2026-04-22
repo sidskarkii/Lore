@@ -43,13 +43,13 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 - [ ] Future: chunk co-occurrence patterns from session logs — learn which chunks get fetched together across sessions as blended signal for recommendations
 
 ### Interaction Logging (prerequisite for all learning)
-- [ ] Log every agent interaction to SQLite: `(session_id, timestamp, action, query, chunk_ids_shown, chunk_ids_fetched, chunk_ids_ignored, chunk_ids_rated)`. Ignored = shown but not fetched. This is the training data for everything below — log from day one
+- [x] Log every agent interaction to SQLite: `(session_id, timestamp, action, query, chunk_ids_shown, chunk_ids_fetched, chunk_ids_ignored, chunk_ids_rated)`. Ignored = shown but not fetched. This is the training data for everything below — log from day one
 - [ ] Weight long sessions higher — a session with 100+ interactions is worth more than 5 sessions with 3 each. Track interaction count per session for weighting
 - [ ] Critical mass detection — periodically count sessions/interactions. Once threshold hit (e.g. 500+ sessions or equivalent weighted), enable RL/co-occurrence training pipeline automatically
 
 ### Long-Term Learning
 - [ ] Wilson Score chunk ratings — store (chunk_id, fetches, ignores) per chunk in SQLite. Rank by lower bound of confidence interval so low-data chunks don't dominate. Binary signal (fetched vs shown-but-ignored) maps perfectly. 5 lines of scipy, zero dependencies
-- [ ] `rate_result(chunk_id, useful)` tool — explicit feedback as strong signal, counts as multiple implicit fetches/ignores. Stored in same SQLite table
+- [x] `rate_result(chunk_id, useful)` tool — explicit feedback as strong signal, counts as multiple implicit fetches/ignores. Stored in same SQLite table
 - [ ] Upgrade to Thompson Sampling — same data model (alpha=fetches, beta=ignores) but adds stochastic exploration. Uncertain chunks occasionally surface higher to gather signal. Switch when we want active exploration behavior
 - [ ] Rating persistence across sessions — SQLite table survives server restarts, improves ranking over weeks of use
 - [ ] Self-improving pipeline — when critical mass hit: train chunk co-occurrence model, session sequence patterns, query-chunk affinity. Retrain periodically as more data accumulates. Log format designed to be consumable by RL frameworks
