@@ -2,9 +2,29 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
+from pathlib import Path
+
+_enrichment_cache: dict[str, dict] | None = None
+
+
+def _get_enrichment_cache() -> dict[str, dict]:
+    global _enrichment_cache
+    if _enrichment_cache is None:
+        cache_path = Path(__file__).resolve().parents[3] / ".enrichment_cache.json"
+        if cache_path.exists():
+            _enrichment_cache = json.loads(cache_path.read_text())
+            print(f"  [enrich] Loaded {len(_enrichment_cache)} cached enrichments")
+        else:
+            _enrichment_cache = {}
+    return _enrichment_cache
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
 def _extract_json(response: str) -> list[dict]:
@@ -160,9 +180,27 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
     Throttles to calls_per_min to avoid rate limits on free tiers.
     """
     min_interval = 60.0 / calls_per_min
-    enrichable = [(i, c) for i, c in enumerate(chunks) if len(c["text"].split()) >= 15]
+    cache = _get_enrichment_cache()
+
+    enrichable = []
+    cached_count = 0
+    for i, c in enumerate(chunks):
+        if len(c["text"].split()) < 15:
+            continue
+        h = _content_hash(c["text"])
+        if h in cache:
+            cached = cache[h]
+            c["title"] = cached.get("title", "")
+            c["summary"] = cached.get("summary", "")
+            c["keywords"] = cached.get("keywords", c.get("keywords", ""))
+            c["questions"] = cached.get("questions", "")
+            c["semantic_key"] = cached.get("semantic_key", "")
+            cached_count += 1
+        else:
+            enrichable.append((i, c))
+
     total_batches = (len(enrichable) + batch_size - 1) // batch_size
-    print(f"  [enrich] LLM enrichment: {len(enrichable)} chunks in {total_batches} batches (~{min_interval:.0f}s apart)")
+    print(f"  [enrich] LLM enrichment: {cached_count} from cache, {len(enrichable)} need LLM ({total_batches} batches)")
 
     last_call = 0.0
     for batch_start in range(0, len(enrichable), batch_size):

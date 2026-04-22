@@ -39,6 +39,7 @@ desktop.ini
 config.local.yaml
 .env
 .env.*
+.enrichment_cache.json
 
 # Eval outputs
 eval_results/
