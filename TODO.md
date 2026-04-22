@@ -48,7 +48,7 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 - [ ] Critical mass detection — periodically count sessions/interactions. Once threshold hit (e.g. 500+ sessions or equivalent weighted), enable RL/co-occurrence training pipeline automatically
 
 ### Long-Term Learning
-- [ ] Wilson Score chunk ratings — store (chunk_id, fetches, ignores) per chunk in SQLite. Rank by lower bound of confidence interval so low-data chunks don't dominate. Binary signal (fetched vs shown-but-ignored) maps perfectly. 5 lines of scipy, zero dependencies
+- [x] Wilson Score chunk ratings — applied after reranking. Fetches/ignores/explicit ratings from SQLite adjust scores. Importance (1-5) also boosts. Conservative weighting (0.1) — reorders close results without overriding strong semantic matches
 - [x] `rate_result(chunk_id, useful)` tool — explicit feedback as strong signal, counts as multiple implicit fetches/ignores. Stored in same SQLite table
 - [ ] Upgrade to Thompson Sampling — same data model (alpha=fetches, beta=ignores) but adds stochastic exploration. Uncertain chunks occasionally surface higher to gather signal. Switch when we want active exploration behavior
 - [ ] Rating persistence across sessions — SQLite table survives server restarts, improves ranking over weeks of use

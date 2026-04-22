@@ -9,6 +9,8 @@ from flashrank import Ranker, RerankRequest
 
 import json
 
+import math
+
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_texts
@@ -143,6 +145,41 @@ def _entity_rank(candidates: list[dict], query_entities: set[str]) -> list[str]:
     return [cid for cid, score in scored if score > 0]
 
 
+def _wilson_score(fetches: int, ignores: int, z: float = 1.96) -> float:
+    """Wilson Score lower bound. Returns 0.5 (neutral) when no data."""
+    n = fetches + ignores
+    if n == 0:
+        return 0.5
+    p = fetches / n
+    return (p + z * z / (2 * n) - z * math.sqrt((p * (1 - p) + z * z / (4 * n)) / n)) / (1 + z * z / n)
+
+
+def _apply_rating_boost(results: list[dict], weight: float = 0.1) -> list[dict]:
+    """Adjust reranker scores using Wilson Score from chunk_ratings + importance."""
+    try:
+        from .database import get_database
+        db = get_database()
+        chunk_ids = [r.get("id", "") for r in results]
+        ratings = db.get_chunk_ratings_batch(chunk_ids)
+    except Exception:
+        ratings = {}
+
+    for r in results:
+        chunk_id = r.get("id", "")
+        rating = ratings.get(chunk_id)
+        if rating:
+            ws = _wilson_score(rating["fetches"] + rating["explicit_up"] * 3,
+                               rating["ignores"] + rating["explicit_down"] * 3)
+            r["_score"] = r.get("_score", 0) + weight * (ws - 0.5)
+
+        importance = r.get("importance", 3)
+        if importance and importance != 3:
+            r["_score"] = r.get("_score", 0) + weight * 0.5 * (max(1, min(5, importance)) - 3) / 2
+
+    results.sort(key=lambda r: r.get("_score", 0), reverse=True)
+    return results
+
+
 class SearchEngine:
     def __init__(self, store: Store | None = None):
         self.store = store or get_store()
@@ -213,7 +250,10 @@ class SearchEngine:
         t5 = time.perf_counter()
         print(f"  [search] rerank:       {(t5-t4)*1000:.0f}ms  ({len(results)} results)")
 
-        # 6. Parent window expansion
+        # 6. Rating + importance boost
+        results = _apply_rating_boost(results)
+
+        # 7. Parent window expansion
         if expand:
             results = [self._expand_to_parent(r) for r in results]
         t6 = time.perf_counter()

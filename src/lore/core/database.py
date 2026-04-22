@@ -363,6 +363,15 @@ class Database:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_chunk_ratings_batch(self, chunk_ids: list[str]) -> dict[str, dict]:
+        if not chunk_ids:
+            return {}
+        placeholders = ",".join("?" for _ in chunk_ids)
+        rows = self._conn.execute(
+            f"SELECT * FROM chunk_ratings WHERE chunk_id IN ({placeholders})", chunk_ids
+        ).fetchall()
+        return {row["chunk_id"]: dict(row) for row in rows}
+
     def get_interaction_stats(self) -> dict:
         total = self._conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
         sessions = self._conn.execute("SELECT COUNT(DISTINCT session_id) FROM interactions").fetchone()[0]
