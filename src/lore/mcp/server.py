@@ -262,7 +262,7 @@ def _register_tools(mcp: FastMCP) -> None:
         direction: Annotated[str, Field(default="around", description="Direction to expand: 'before', 'after', or 'around' the target.")] = "around",
         amount_sec: Annotated[int, Field(default=300, ge=30, le=1800, description="How many seconds of context to fetch.")] = 300,
         page: Annotated[int, Field(default=1, ge=1, description="Page number (1-indexed). Use with page_tokens to paginate through content.")] = 1,
-        page_tokens: Annotated[int, Field(default=0, ge=0, description="Max tokens per page. 0 = no pagination (return all). Agent controls how much to read per page.")] = 0,
+        page_tokens: Annotated[int, Field(default=1500, ge=0, description="Max tokens per page. 0 = no pagination (return all). Default 1500. Agent controls how much to read per page.")] = 1500,
     ) -> dict:
         """Read more content around a search result or a specific section.
 
