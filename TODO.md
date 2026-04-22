@@ -107,11 +107,16 @@ Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for s
 - [x] Robust JSON extraction for LLM enrichment — sanitize control chars, regex fallback for malformed responses
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
+## Provider & Configuration
+- [ ] Discoverable provider setup — `configure` MCP tool or first-run wizard that asks for API base URL + key. Not buried in yaml files
+- [ ] Support all OpenAI-compatible APIs out of the box (OpenRouter, Ollama, LM Studio, Together, Groq, OpenAI, Anthropic via proxy). Already works technically, just needs docs + validation
+- [ ] MCP sampling for enrichment — ask the calling agent's LLM to do enrichment instead of making our own API calls. Zero config, no API key needed. The harness (Claude Code, Cursor) pays for the calls. This is the ideal default
+- [ ] Fallback chain: try sampling first, fall back to configured provider, fall back to skip LLM enrichment (keywords/entities only)
+
 ## Later
 - [ ] Frontend rework
 - [ ] DMG packaging via Tauri sidecar
 - [ ] Local enrichment model — Gemma 4 E4B via Ollama (~5GB Q4, ~40-60 tok/s on M1, native JSON output). Runner-up: Qwen 3.5 4B (~2.5GB, faster). Replace OpenRouter enrichment calls with local inference for fully offline pipeline
-- [ ] MCP sampling for enrichment (use calling agent's LLM)
 
 ## Done
 - [x] Progressive disclosure: compact search results (metadata + scores + token_count, no text) with get_context for full fetch

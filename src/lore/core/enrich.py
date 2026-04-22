@@ -173,11 +173,12 @@ def _llm_call_with_retry(provider, messages, max_retries: int = 3) -> str:
             raise
 
 
-def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min: float = 7.5) -> list[dict]:
+def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min: float = 7.5, on_progress=None) -> list[dict]:
     """Add LLM-generated enrichment: title, summary, tags, questions, semantic_key.
 
     Batches multiple chunks per LLM call for efficiency.
     Throttles to calls_per_min to avoid rate limits on free tiers.
+    on_progress: optional callback(batch_num, total_batches, cached_count) for live status.
     """
     min_interval = 60.0 / calls_per_min
     cache = _get_enrichment_cache()
@@ -237,6 +238,8 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
     for batch_start in range(0, len(enrichable), batch_size):
         batch = enrichable[batch_start:batch_start + batch_size]
         batch_num = batch_start // batch_size + 1
+        if on_progress:
+            on_progress(batch_num, total_batches, cached_count)
         if not _run_batch(batch, f"Batch {batch_num}/{total_batches}"):
             failed_batches.append(batch)
 
@@ -244,6 +247,8 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
         print(f"  [enrich] Retrying {len(failed_batches)} failed batches...")
         still_failed = 0
         for i, batch in enumerate(failed_batches):
+            if on_progress:
+                on_progress(total_batches + i + 1, total_batches + len(failed_batches), cached_count)
             if not _run_batch(batch, f"Retry {i+1}/{len(failed_batches)}"):
                 still_failed += 1
         if still_failed:

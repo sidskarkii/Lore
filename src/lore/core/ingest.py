@@ -502,13 +502,14 @@ class Ingester:
 
             provider = get_registry().active
             if provider:
-                if on_progress:
-                    on_progress(IngestionProgress(
-                        stage="enriching", progress=0.6, current_item=item_name,
-                        total_items=1, completed_items=0,
-                        message="LLM enrichment (titles, summaries, tags)...",
-                    ))
-                chunks = enrich_llm(chunks, provider)
+                def _llm_progress(batch_num, total_batches, cached):
+                    if on_progress:
+                        on_progress(IngestionProgress(
+                            stage="enriching", progress=0.5 + 0.2 * (batch_num / max(total_batches, 1)),
+                            current_item=item_name, total_items=1, completed_items=0,
+                            message=f"LLM enrichment batch {batch_num}/{total_batches} ({cached} cached)...",
+                        ))
+                chunks = enrich_llm(chunks, provider, on_progress=_llm_progress)
 
         meta = {
             "collection": collection,
