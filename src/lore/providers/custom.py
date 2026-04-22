@@ -59,7 +59,7 @@ class CustomProvider(Provider):
             raise RuntimeError("Custom endpoint not configured. Set provider.custom.base_url in config.yaml")
         return OpenAI(base_url=base_url, api_key=api_key or "none", max_retries=0)
 
-    def chat(self, messages: list[dict], model: str | None = None) -> str:
+    def chat(self, messages: list[dict], model: str | None = None, max_tokens: int = 8192) -> str:
         client = self._get_client()
         _, _, default_model = self._get_config()
         model = model or default_model or "default"
@@ -68,7 +68,7 @@ class CustomProvider(Provider):
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
-                max_tokens=1500,
+                max_tokens=max_tokens,
             )
             return response.choices[0].message.content
         except Exception as e:
