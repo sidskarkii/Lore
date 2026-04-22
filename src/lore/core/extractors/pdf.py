@@ -123,6 +123,57 @@ def _split_markdown_sections(md: str) -> list[dict]:
     return sections
 
 
+_CHAPTER_PATTERNS = [
+    re.compile(r'^((?:Chapter|CHAPTER)\s+\w+[.:]\s*.*)', re.MULTILINE),
+    re.compile(r'^([IVXivx]+\.\s+[A-Z][\w\s,&\'-]+)', re.MULTILINE),
+    re.compile(r'^((?:Part|PART)\s+\w+[.:]\s*.*)', re.MULTILINE),
+    re.compile(r'^((?:Section|SECTION)\s+\d+[.:]\s*.*)', re.MULTILINE),
+]
+
+
+def _clean_title(title: str) -> str:
+    """Remove trailing page numbers and whitespace from chapter titles."""
+    return re.sub(r'\s*\d+\s*$', '', title).strip()
+
+
+def _split_by_chapter_patterns(text: str) -> list[dict]:
+    """Fallback: split text by detected chapter patterns when font-based headings fail."""
+    for pattern in _CHAPTER_PATTERNS:
+        matches = list(pattern.finditer(text))
+        if len(matches) >= 3:
+            raw_sections = []
+            preamble = text[:matches[0].start()].strip()
+            if preamble and len(preamble) > 200:
+                raw_sections.append({"title": "(preamble)", "text": preamble})
+
+            for i, m in enumerate(matches):
+                title = _clean_title(m.group(1))
+                start = m.end()
+                end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+                body = text[start:end].strip()
+                if body and len(body) > 200:
+                    raw_sections.append({"title": title, "text": body})
+
+            seen: dict[str, int] = {}
+            for i, s in enumerate(raw_sections):
+                t = s["title"]
+                if t in seen:
+                    if len(s["text"]) > len(raw_sections[seen[t]]["text"]):
+                        raw_sections[seen[t]] = None
+                        seen[t] = i
+                    else:
+                        raw_sections[i] = None
+                else:
+                    seen[t] = i
+
+            sections = [s for s in raw_sections if s is not None]
+            if sections:
+                print(f"  [pdf] Chapter pattern split: {len(sections)} sections via {pattern.pattern[:30]}...")
+                return sections
+
+    return []
+
+
 _MIN_CHARS = 100
 
 
@@ -145,6 +196,11 @@ def extract_pdf(path: str) -> ExtractedDocument:
             md = marker_md
 
     sections = _split_markdown_sections(md)
+
+    if len(sections) <= 2:
+        chapter_sections = _split_by_chapter_patterns(md)
+        if chapter_sections:
+            sections = chapter_sections
 
     metadata = {
         "filename": p.name,
