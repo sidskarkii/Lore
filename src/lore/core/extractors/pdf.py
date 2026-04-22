@@ -24,12 +24,16 @@ def _is_bold(span: dict) -> bool:
     return bool(span["flags"] & 16)
 
 
+_PAGE_MARKER = "\n<!--PAGE:{n}-->\n"
+
+
 def _extract_pages(path: str) -> str:
     """Extract full PDF with font-aware heading and code block detection."""
     doc = pymupdf.open(path)
     output: list[str] = []
 
     for page in doc:
+        output.append(_PAGE_MARKER.format(n=page.number + 1))
         blocks = page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)["blocks"]
         in_code = False
         code_min_x0 = 0.0
@@ -98,27 +102,42 @@ def _extract_with_marker(path: str) -> str | None:
         return None
 
 
+_PAGE_RE = re.compile(r'<!--PAGE:(\d+)-->')
+
+
+def _find_page_num(text: str, pos: int, full_text: str) -> int:
+    """Find the page number for a position in the text by looking backwards for page markers."""
+    chunk = full_text[:pos]
+    matches = list(_PAGE_RE.finditer(chunk))
+    return int(matches[-1].group(1)) if matches else 0
+
+
+def _strip_page_markers(text: str) -> str:
+    return _PAGE_RE.sub('', text).strip()
+
+
 def _split_markdown_sections(md: str) -> list[dict]:
     """Split markdown text by headers (# / ## / ###)."""
     matches = list(_HEADER_RE.finditer(md))
 
     if not matches:
-        text = md.strip()
-        return [{"title": "(untitled)", "text": text}] if text else []
+        text = _strip_page_markers(md).strip()
+        page = _find_page_num(text, 0, md)
+        return [{"title": "(untitled)", "text": text, "page_num": page}] if text else []
 
     sections: list[dict] = []
 
-    preamble = md[: matches[0].start()].strip()
+    preamble = _strip_page_markers(md[: matches[0].start()]).strip()
     if preamble:
-        sections.append({"title": "(preamble)", "text": preamble})
+        sections.append({"title": "(preamble)", "text": preamble, "page_num": _find_page_num("", matches[0].start(), md)})
 
     for idx, m in enumerate(matches):
         title = m.group(2).strip()
         start = m.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(md)
-        body = md[start:end].strip()
+        body = _strip_page_markers(md[start:end]).strip()
         if body:
-            sections.append({"title": title, "text": body})
+            sections.append({"title": title, "text": body, "page_num": _find_page_num("", m.start(), md)})
 
     return sections
 
@@ -142,17 +161,17 @@ def _split_by_chapter_patterns(text: str) -> list[dict]:
         matches = list(pattern.finditer(text))
         if len(matches) >= 3:
             raw_sections = []
-            preamble = text[:matches[0].start()].strip()
+            preamble = _strip_page_markers(text[:matches[0].start()]).strip()
             if preamble and len(preamble) > 200:
-                raw_sections.append({"title": "(preamble)", "text": preamble})
+                raw_sections.append({"title": "(preamble)", "text": preamble, "page_num": _find_page_num("", matches[0].start(), text)})
 
             for i, m in enumerate(matches):
                 title = _clean_title(m.group(1))
                 start = m.end()
                 end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-                body = text[start:end].strip()
+                body = _strip_page_markers(text[start:end]).strip()
                 if body and len(body) > 200:
-                    raw_sections.append({"title": title, "text": body})
+                    raw_sections.append({"title": title, "text": body, "page_num": _find_page_num("", m.start(), text)})
 
             seen: dict[str, int] = {}
             for i, s in enumerate(raw_sections):

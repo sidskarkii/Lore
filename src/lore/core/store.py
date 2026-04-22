@@ -34,11 +34,14 @@ def _build_chunk_id(meta: dict, chunk: dict, index: int) -> str:
 
     elif source_type == "pdf":
         page = int(chunk.get("page_num", 0))
+        section = chunk.get("section_heading", "") or chunk.get("chapter", "")
         line_start = int(chunk.get("line_start", 0))
         line_end = int(chunk.get("line_end", 0))
-        page_part = f"p{page}" if page > 0 else f"s{index:03d}"
+        sec_part = _slug(section, 20) if section and section not in ("(untitled)", "(preamble)") else ""
+        page_part = f"p{page}" if page > 0 else ""
+        loc = sec_part or page_part or f"s{index:03d}"
         line_part = f"_L{line_start}-{line_end}" if line_start > 0 else ""
-        return f"{collection}_{page_part}_{index:04d}{line_part}"
+        return f"{collection}_{loc}_{index:04d}{line_part}"
 
     elif source_type in ("video", "audio"):
         start = int(chunk.get("start_sec", 0))
