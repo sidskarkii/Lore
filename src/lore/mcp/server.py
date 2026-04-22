@@ -261,6 +261,8 @@ def _register_tools(mcp: FastMCP) -> None:
         end_sec: Annotated[int | None, Field(default=None, description="End of the time window in seconds.")] = None,
         direction: Annotated[str, Field(default="around", description="Direction to expand: 'before', 'after', or 'around' the target.")] = "around",
         amount_sec: Annotated[int, Field(default=300, ge=30, le=1800, description="How many seconds of context to fetch.")] = 300,
+        page: Annotated[int, Field(default=1, ge=1, description="Page number (1-indexed). Use with page_tokens to paginate through content.")] = 1,
+        page_tokens: Annotated[int, Field(default=0, ge=0, description="Max tokens per page. 0 = no pagination (return all). Agent controls how much to read per page.")] = 0,
     ) -> dict:
         """Read more content around a search result or a specific section.
 
@@ -276,6 +278,8 @@ def _register_tools(mcp: FastMCP) -> None:
         - direction: 'around' expands equally in both directions. 'before'
           fetches content leading up to the point. 'after' fetches what follows.
         - amount_sec: Total seconds of context to fetch (default 300 = 5 minutes).
+        - page_tokens: Set to control how many tokens per page (e.g. 500, 1000).
+          Use page param to navigate. Response includes total_pages.
         """
         try:
             store = get_store()
@@ -336,14 +340,34 @@ def _register_tools(mcp: FastMCP) -> None:
                     chunk_index_end=idx_end,
                 )
 
-            chunks = [_format_result(row) for row in neighbors]
+            all_chunks = [_format_result(row) for row in neighbors]
+
+            if page_tokens > 0 and all_chunks:
+                pages: list[list[dict]] = [[]]
+                current_tokens = 0
+                for c in all_chunks:
+                    ct = c.get("token_count", 0)
+                    if current_tokens + ct > page_tokens and pages[-1]:
+                        pages.append([])
+                        current_tokens = 0
+                    pages[-1].append(c)
+                    current_tokens += ct
+
+                total_pages = len(pages)
+                page_idx = min(page, total_pages) - 1
+                chunks = pages[page_idx]
+            else:
+                chunks = all_chunks
+                total_pages = 1
 
             result = {
                 "success": True,
                 "collection": collection,
                 "episode_num": episode_num,
                 "direction": direction,
-                "total": len(chunks),
+                "total": len(all_chunks),
+                "page": page,
+                "total_pages": total_pages,
                 "chunks": chunks,
             }
             if has_timestamps:

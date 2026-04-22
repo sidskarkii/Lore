@@ -3,7 +3,7 @@
 **Target:** macOS, Apple Silicon (M1+), 16GB+ RAM
 
 ## Context Engineering
-- [ ] Entity-boosted search: extract entities from query, match against stored entities, boost chunks with entity overlap as third RRF signal
+- [x] Entity-boosted search: extract entities from query, match against stored entities, boost chunks with entity overlap as third RRF signal
 - [ ] System prompt rework for RAG harness
 
 ## Source Structure & Navigation
@@ -32,7 +32,7 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 
 ### Retrieval UX
 - [x] `get_toc(collection)` tool — returns document structure (parts, chapters, sections) for structural navigation
-- [ ] Paginated context expansion — `get_context` returns pages instead of dumping full neighborhood. Agent controls page size via `page_tokens` param (e.g. 50 or 1000 tokens per page) and navigates with `page` param. Each response includes total pages so agent knows how much is left
+- [x] Paginated context expansion — `get_context` returns pages instead of dumping full neighborhood. Agent controls page size via `page_tokens` param (e.g. 50 or 1000 tokens per page) and navigates with `page` param. Each response includes total pages so agent knows how much is left
 - [ ] Built-in dedup — search and get_context never return content the agent already has in the current response
 - [ ] Search returns all compact by default; agent selectively expands individual results (current compact/expand model but with pagination on expand side)
 
@@ -104,7 +104,7 @@ Route LLM tasks to appropriately-sized models via OpenRouter. Cheap models for s
 
 ## Enrichment
 - [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings)
-- [ ] Structured output / JSON mode for LLM enrichment instead of code fence parsing
+- [x] Robust JSON extraction for LLM enrichment — sanitize control chars, regex fallback for malformed responses
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
 ## Later

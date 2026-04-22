@@ -7,6 +7,8 @@ import time
 
 from flashrank import Ranker, RerankRequest
 
+import json
+
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_texts
@@ -89,6 +91,47 @@ def _parse_sub_queries(text: str, max_queries: int) -> list[str]:
     return queries[:max_queries]
 
 
+def _extract_query_entities(query: str) -> set[str]:
+    """Extract entity names from the search query using spaCy."""
+    try:
+        from .enrich import _get_nlp
+        nlp = _get_nlp()
+        doc = nlp(query)
+        entities = set()
+        for ent in doc.ents:
+            entities.add(ent.text.lower())
+        for token in doc:
+            if token.pos_ == "PROPN":
+                entities.add(token.text.lower())
+        return entities
+    except Exception:
+        return set()
+
+
+def _entity_rank(candidates: list[dict], query_entities: set[str]) -> list[str]:
+    """Rank candidates by entity overlap with query entities."""
+    scored = []
+    for c in candidates:
+        try:
+            ents_raw = c.get("entities", "")
+            if ents_raw:
+                ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
+                chunk_entities = {e.get("name", "").lower() for e in ents if isinstance(e, dict)}
+            else:
+                chunk_entities = set()
+        except (json.JSONDecodeError, TypeError):
+            chunk_entities = set()
+
+        kw_raw = c.get("keywords", "")
+        chunk_keywords = {k.strip().lower() for k in kw_raw.split(",")} if kw_raw else set()
+
+        overlap = len(query_entities & (chunk_entities | chunk_keywords))
+        scored.append((c["id"], overlap))
+
+    scored.sort(key=lambda x: -x[1])
+    return [cid for cid, score in scored if score > 0]
+
+
 class SearchEngine:
     def __init__(self, store: Store | None = None):
         self.store = store or get_store()
@@ -124,15 +167,22 @@ class SearchEngine:
         t3 = time.perf_counter()
         print(f"  [search] fts:          {(t3-t2)*1000:.0f}ms  ({len(fts_results)} hits)")
 
-        # 4. RRF fusion
-        vec_ids = [r["id"] for r in vec_results] if vec_results else []
-        fts_ids = [r["id"] for r in fts_results] if fts_results else []
-        rrf_scores = _rrf([vec_ids, fts_ids], k=rrf_k)
-
+        # 4. RRF fusion (vector + FTS + entity overlap)
         all_by_id: dict[str, dict] = {}
         for r in vec_results + fts_results:
             if r["id"] not in all_by_id:
                 all_by_id[r["id"]] = r
+
+        vec_ids = [r["id"] for r in vec_results] if vec_results else []
+        fts_ids = [r["id"] for r in fts_results] if fts_results else []
+
+        query_entities = _extract_query_entities(query)
+        if query_entities:
+            entity_ids = _entity_rank(list(all_by_id.values()), query_entities)
+            rrf_scores = _rrf([vec_ids, fts_ids, entity_ids], k=rrf_k)
+            print(f"  [search] entities:     {len(query_entities)} query entities, {len(entity_ids)} matches")
+        else:
+            rrf_scores = _rrf([vec_ids, fts_ids], k=rrf_k)
 
         candidates = sorted(
             [r for r in all_by_id.values() if r["id"] in rrf_scores],

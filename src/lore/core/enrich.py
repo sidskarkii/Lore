@@ -3,7 +3,36 @@
 from __future__ import annotations
 
 import json
+import re
 import time
+
+
+def _extract_json(response: str) -> list[dict]:
+    """Extract JSON array from LLM response, handling common malformations."""
+    if not response:
+        raise ValueError("Empty response")
+
+    text = response.strip()
+    if text.startswith("```"):
+        text = text.split("```")[1]
+        if text.startswith("json"):
+            text = text[4:]
+        text = text.strip()
+
+    text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', text)
+
+    try:
+        results = json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r'\[.*\]', text, re.DOTALL)
+        if match:
+            results = json.loads(match.group())
+        else:
+            raise
+
+    if not isinstance(results, list):
+        results = [results]
+    return results
 
 _kw_model = None
 _nlp = None
@@ -159,15 +188,7 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
                 [{"role": "user", "content": prompt}],
             )
 
-            json_str = response.strip()
-            if json_str.startswith("```"):
-                json_str = json_str.split("```")[1]
-                if json_str.startswith("json"):
-                    json_str = json_str[4:]
-
-            results = json.loads(json_str)
-            if not isinstance(results, list):
-                results = [results]
+            results = _extract_json(response)
 
             for (orig_idx, chunk), enrichment in zip(batch, results):
                 chunk["title"] = enrichment.get("title", "")
