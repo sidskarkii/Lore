@@ -277,7 +277,7 @@ def _register_tools(mcp: FastMCP) -> None:
 
     # ── get_context ──────────────────────────────────────────────────
 
-    _CHUNK_ID_RE = re.compile(r"^(.+)_ep(\d{3})_\d{4}$")
+    # Chunk IDs are now domain-specific — look up metadata from store instead of parsing
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_context(
@@ -316,12 +316,8 @@ def _register_tools(mcp: FastMCP) -> None:
                 if not chunk:
                     return {"success": False, "error": f"Chunk not found: {chunk_id}"}
 
-                m = _CHUNK_ID_RE.match(chunk_id)
-                if not m:
-                    return {"success": False, "error": f"Invalid chunk_id format: {chunk_id}"}
-
-                collection = m.group(1)
-                episode_num = int(m.group(2))
+                collection = chunk.get("collection", "")
+                episode_num = int(chunk.get("episode_num", 1))
                 has_timestamps = int(chunk.get("start_sec", 0)) > 0 or int(chunk.get("end_sec", 0)) > 0
             elif collection is not None and episode_num is not None and start_sec is not None:
                 has_timestamps = True

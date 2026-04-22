@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +14,54 @@ import pyarrow as pa
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_dim, embed_texts
+
+
+def _slug(text: str, max_len: int = 30) -> str:
+    """Convert text to a clean slug for chunk IDs."""
+    s = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
+    return s[:max_len].rstrip('_')
+
+
+def _build_chunk_id(meta: dict, chunk: dict, index: int) -> str:
+    """Build a domain-specific chunk ID based on source type."""
+    collection = _slug(meta.get("collection", "unknown"))
+    source_type = meta.get("source_type", "")
+
+    if source_type == "epub":
+        chapter = chunk.get("chapter", "") or chunk.get("section_heading", "")
+        ch_slug = _slug(chapter, 20) if chapter else f"s{index:03d}"
+        return f"{collection}_ch_{ch_slug}_{index:04d}"
+
+    elif source_type == "pdf":
+        page = int(chunk.get("page_num", 0))
+        line_start = int(chunk.get("line_start", 0))
+        line_end = int(chunk.get("line_end", 0))
+        page_part = f"p{page}" if page > 0 else f"s{index:03d}"
+        line_part = f"_L{line_start}-{line_end}" if line_start > 0 else ""
+        return f"{collection}_{page_part}_{index:04d}{line_part}"
+
+    elif source_type in ("video", "audio"):
+        start = int(chunk.get("start_sec", 0))
+        m, s = divmod(start, 60)
+        ep_name = _slug(meta.get("episode_title", ""), 20)
+        ep_num = int(meta.get("episode_num", 1))
+        if ep_name:
+            return f"{collection}_{ep_name}_t{m:02d}m{s:02d}s"
+        return f"{collection}_ep{ep_num:03d}_t{m:02d}m{s:02d}s"
+
+    elif source_type == "code":
+        file_path = chunk.get("file_path", "")
+        path_slug = _slug(file_path.replace("/", "_").replace(".", "_"), 40)
+        line_start = int(chunk.get("line_start", 0))
+        line_end = int(chunk.get("line_end", 0))
+        return f"{collection}_{path_slug}_L{line_start}-{line_end}"
+
+    elif source_type == "web":
+        section = chunk.get("section_heading", "")
+        sec_slug = _slug(section, 20) if section else f"s{index:03d}"
+        return f"{collection}_{sec_slug}_{index:04d}"
+
+    return f"{collection}_{index:04d}"
 
 
 def _deep_link_url(url: str, start_sec: int) -> str:
@@ -143,7 +192,7 @@ class Store:
 
         rows = []
         for i, (chunk, vec) in enumerate(zip(new_chunks, vectors)):
-            chunk_id = f"{meta['collection']}_ep{meta['episode_num']:03d}_{i:04d}"
+            chunk_id = _build_chunk_id(meta, chunk, i)
             start_sec = int(chunk.get("start_sec", 0))
             rows.append({
                 "id":                 chunk_id,

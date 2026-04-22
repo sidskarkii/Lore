@@ -73,6 +73,38 @@ class Ingester:
         self.transcriber = Transcriber()
         self._cfg = get_config()
 
+    # ── Archive ──────────────────────────────────────────────────────
+
+    def _save_archive(self, collection: str, doc, chunks: list[dict], meta: dict):
+        """Save extracted text and enriched chunks to source-segregated archive."""
+        archive_path = self._cfg.archive_dir / collection
+        archive_path.mkdir(parents=True, exist_ok=True)
+
+        (archive_path / "meta.json").write_text(json.dumps({
+            **meta,
+            "archived_at": __import__("datetime").datetime.now().isoformat(),
+            "doc_metadata": doc.metadata,
+            "section_count": len(doc.sections),
+            "chunk_count": len(chunks),
+        }, indent=2, default=str))
+
+        sections_md = []
+        for s in doc.sections:
+            heading = s.get("title", s.get("heading", ""))
+            if heading:
+                sections_md.append(f"## {heading}\n\n{s['text']}")
+            else:
+                sections_md.append(s["text"])
+        (archive_path / "extracted.md").write_text("\n\n---\n\n".join(sections_md))
+
+        serializable_chunks = []
+        for c in chunks:
+            sc = {k: v for k, v in c.items() if k != "vector" and not k.startswith("_")}
+            serializable_chunks.append(sc)
+        (archive_path / "chunks.json").write_text(json.dumps(serializable_chunks, indent=2, default=str))
+
+        print(f"  [archive] Saved to {archive_path}")
+
     # ── Video/Audio folder ────────────────────────────────────────────
 
     def ingest_folder(
@@ -478,13 +510,6 @@ class Ingester:
                     ))
                 chunks = enrich_llm(chunks, provider)
 
-        if on_progress:
-            on_progress(IngestionProgress(
-                stage="embedding", progress=0.7, current_item=item_name,
-                total_items=1, completed_items=0,
-                message=f"Embedding {len(chunks)} chunks...",
-            ))
-
         meta = {
             "collection": collection,
             "collection_display": name,
@@ -496,6 +521,21 @@ class Ingester:
             "source_type": doc.source_type,
             "file_path": source_path,
         }
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="archiving", progress=0.65, current_item=item_name,
+                total_items=1, completed_items=0,
+                message="Saving to archive...",
+            ))
+        self._save_archive(collection, doc, chunks, meta)
+
+        if on_progress:
+            on_progress(IngestionProgress(
+                stage="embedding", progress=0.7, current_item=item_name,
+                total_items=1, completed_items=0,
+                message=f"Embedding {len(chunks)} chunks...",
+            ))
 
         n = self.store.add_chunks(chunks, meta)
 

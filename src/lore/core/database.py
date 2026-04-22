@@ -112,7 +112,7 @@ class Database:
     def __init__(self, db_path: str | Path | None = None):
         if db_path is None:
             cfg = get_config()
-            db_path = cfg.resolve_path("store.path").parent / "app.db"
+            db_path = cfg.data_dir / "app.db"
 
         self._path = Path(db_path)
         self._path.parent.mkdir(parents=True, exist_ok=True)

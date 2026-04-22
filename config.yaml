@@ -8,10 +8,10 @@ server:
 
 # --- Storage ---
 store:
-  # Where LanceDB stores its data. Relative to project root.
-  path: .lancedb
+  # Where LanceDB stores its data. Relative to ~/.lore/ data dir.
+  path: store
   # Main table name for chunks
-  table: tutorials
+  table: chunks
   # Episode summaries table
   summaries_table: episode_summaries
 

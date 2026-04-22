@@ -202,17 +202,16 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
     total_batches = (len(enrichable) + batch_size - 1) // batch_size
     print(f"  [enrich] LLM enrichment: {cached_count} from cache, {len(enrichable)} need LLM ({total_batches} batches)")
 
+    failed_batches: list[list[tuple[int, dict]]] = []
     last_call = 0.0
-    for batch_start in range(0, len(enrichable), batch_size):
-        batch = enrichable[batch_start:batch_start + batch_size]
-        batch_num = batch_start // batch_size + 1
 
+    def _run_batch(batch: list[tuple[int, dict]], batch_label: str) -> bool:
+        nonlocal last_call
         elapsed = time.time() - last_call
         if last_call > 0 and elapsed < min_interval:
-            wait = min_interval - elapsed
-            time.sleep(wait)
+            time.sleep(min_interval - elapsed)
 
-        print(f"  [enrich] Batch {batch_num}/{total_batches}...")
+        print(f"  [enrich] {batch_label}...")
 
         chunks_text = ""
         for idx, (_, chunk) in enumerate(batch):
@@ -221,11 +220,7 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
         try:
             last_call = time.time()
             prompt = _ENRICH_PROMPT.format(chunks=chunks_text)
-            response = _llm_call_with_retry(
-                provider,
-                [{"role": "user", "content": prompt}],
-            )
-
+            response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
             results = _extract_json(response)
 
             for (orig_idx, chunk), enrichment in zip(batch, results):
@@ -234,8 +229,24 @@ def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min:
                 chunk["keywords"] = ", ".join(enrichment.get("tags", []))
                 chunk["questions"] = json.dumps(enrichment.get("questions", []))
                 chunk["semantic_key"] = enrichment.get("semantic_key", "")
-
+            return True
         except Exception as e:
-            print(f"  LLM enrichment failed for batch: {e}")
+            print(f"  [enrich] Failed: {e}")
+            return False
+
+    for batch_start in range(0, len(enrichable), batch_size):
+        batch = enrichable[batch_start:batch_start + batch_size]
+        batch_num = batch_start // batch_size + 1
+        if not _run_batch(batch, f"Batch {batch_num}/{total_batches}"):
+            failed_batches.append(batch)
+
+    if failed_batches:
+        print(f"  [enrich] Retrying {len(failed_batches)} failed batches...")
+        still_failed = 0
+        for i, batch in enumerate(failed_batches):
+            if not _run_batch(batch, f"Retry {i+1}/{len(failed_batches)}"):
+                still_failed += 1
+        if still_failed:
+            print(f"  [enrich] {still_failed} batches permanently failed")
 
     return chunks

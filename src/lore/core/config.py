@@ -8,14 +8,16 @@ from typing import Any
 
 import yaml
 
+_DATA_DIR = Path(os.environ.get("LORE_DATA_DIR", "")) if os.environ.get("LORE_DATA_DIR") else Path.home() / ".lore"
+
 _DEFAULTS = {
     "server": {
         "host": "127.0.0.1",
-        "port": 8000,
+        "port": 52105,
     },
     "store": {
-        "path": ".lancedb",
-        "table": "tutorials",
+        "path": "store",
+        "table": "chunks",
         "summaries_table": "episode_summaries",
     },
     "embedding": {
@@ -115,12 +117,26 @@ class Config:
         return node
 
     def resolve_path(self, dotpath: str) -> Path:
-        """Get a path value, resolving relative paths against project root."""
+        """Get a path value, resolving relative paths against data dir."""
         raw = self.get(dotpath, "")
         p = Path(raw)
         if p.is_absolute():
             return p
-        return self._root / p
+        return self.data_dir / p
+
+    @property
+    def data_dir(self) -> Path:
+        """Global data directory (~/.lore/ or LORE_DATA_DIR override)."""
+        d = _DATA_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    @property
+    def archive_dir(self) -> Path:
+        """Source-segregated archive directory."""
+        d = self.data_dir / "archive"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
 
     @property
     def project_root(self) -> Path:
