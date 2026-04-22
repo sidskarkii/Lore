@@ -16,6 +16,10 @@ from .config import get_config
 from .embed import embed_dim, embed_texts
 
 
+def _esc(val: str) -> str:
+    return val.replace("'", "''")
+
+
 def _slug(text: str, max_len: int = 30) -> str:
     """Convert text to a clean slug for chunk IDs."""
     s = re.sub(r'[^a-z0-9]+', '_', text.lower()).strip('_')
@@ -151,9 +155,17 @@ class Store:
             tbl = self._db.open_table(self._table_name)
             existing_cols = {f.name for f in tbl.schema}
             required_cols = {f.name for f in _schema(self._dim)}
-            if not required_cols.issubset(existing_cols):
-                self._db.drop_table(self._table_name)
-                tbl = self._db.create_table(self._table_name, schema=_schema(self._dim))
+            missing = required_cols - existing_cols
+            if missing:
+                print(f"  [store] Schema migration: adding columns {missing}")
+                try:
+                    for field in _schema(self._dim):
+                        if field.name in missing:
+                            tbl.add_columns({"column": field, "values": None})
+                except Exception as e:
+                    print(f"  [store] Migration failed ({e}), recreating table (data loss)")
+                    self._db.drop_table(self._table_name)
+                    tbl = self._db.create_table(self._table_name, schema=_schema(self._dim))
             self._table = tbl
         else:
             self._table = self._db.create_table(self._table_name, schema=_schema(self._dim))
@@ -184,8 +196,9 @@ class Store:
 
         existing_hashes: set[str] = set()
         try:
-            all_rows = tbl.search().select(["content_hash"]).limit(500_000).to_list()
-            existing_hashes = {r["content_hash"] for r in all_rows if r.get("content_hash")}
+            collection = _esc(meta["collection"])
+            rows = tbl.search().where(f"collection = '{collection}'").select(["content_hash"]).limit(500_000).to_list()
+            existing_hashes = {r["content_hash"] for r in rows if r.get("content_hash")}
         except Exception:
             pass
 
@@ -236,7 +249,7 @@ class Store:
         # Remove old chunks for this episode before re-adding
         try:
             tbl.delete(
-                f"collection = '{meta['collection']}' "
+                f"collection = '{_esc(meta['collection'])}' "
                 f"AND episode_num = {meta['episode_num']}"
             )
         except Exception:
@@ -275,14 +288,14 @@ class Store:
     def delete_collection(self, collection: str):
         """Remove all chunks for a collection."""
         tbl = self._get_or_create_table()
-        tbl.delete(f"collection = '{collection}'")
+        tbl.delete(f"collection = '{_esc(collection)}'")
         self._optimize(tbl)
 
     def delete_episode(self, collection: str, episode_num: int):
         """Remove chunks for a specific episode."""
         tbl = self._get_or_create_table()
         tbl.delete(
-            f"collection = '{collection}' AND episode_num = {episode_num}"
+            f"collection = '{_esc(collection)}' AND episode_num = {episode_num}"
         )
         self._optimize(tbl)
 
@@ -330,7 +343,7 @@ class Store:
         """Look up a single chunk by its ID."""
         tbl = self._get_or_create_table()
         try:
-            results = tbl.search().where(f"id = '{chunk_id}'").limit(1).to_list()
+            results = tbl.search().where(f"id = '{_esc(chunk_id)}'").limit(1).to_list()
             return results[0] if results else None
         except Exception:
             return None
@@ -340,7 +353,7 @@ class Store:
         tbl = self._get_or_create_table()
         rows = (
             tbl.search()
-            .where(f"collection = '{collection}'")
+            .where(f"collection = '{_esc(collection)}'")
             .select(["id", "chunk_index", "section_heading", "chapter", "episode_num", "episode_title", "text", "title", "source_type"])
             .limit(100_000)
             .to_list()
@@ -421,7 +434,7 @@ class Store:
         """
         tbl = self._get_or_create_table()
         where = (
-            f"collection = '{collection}' "
+            f"collection = '{_esc(collection)}' "
             f"AND episode_num = {episode_num} "
             f"AND start_sec >= {start_sec} "
             f"AND start_sec <= {end_sec}"
@@ -453,7 +466,7 @@ class Store:
         """Get chunks by index range for document-style expansion."""
         tbl = self._get_or_create_table()
         where = (
-            f"collection = '{collection}' "
+            f"collection = '{_esc(collection)}' "
             f"AND episode_num = {episode_num} "
             f"AND chunk_index >= {chunk_index_start} "
             f"AND chunk_index <= {chunk_index_end}"

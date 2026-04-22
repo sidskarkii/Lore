@@ -496,6 +496,10 @@ class Ingester:
         if not chunks:
             return 0
 
+        section_summaries = []
+        book_summary = {}
+        provider = None
+
         if enrich:
             if on_progress:
                 on_progress(IngestionProgress(
@@ -507,8 +511,6 @@ class Ingester:
 
             provider = get_registry().active
             book_title = doc.metadata.get("book_title", doc.metadata.get("page_title", name))
-            section_summaries = []
-            book_summary = {}
             if provider:
                 def _llm_progress(batch_num, total_batches, cached):
                     if on_progress:

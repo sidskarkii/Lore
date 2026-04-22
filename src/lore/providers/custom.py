@@ -53,11 +53,17 @@ class CustomProvider(Provider):
         )
 
     def _get_client(self):
+        import httpx
         from openai import OpenAI
         base_url, api_key, _ = self._get_config()
         if not base_url:
             raise RuntimeError("Custom endpoint not configured. Set provider.custom.base_url in config.yaml")
-        return OpenAI(base_url=base_url, api_key=api_key or "none", max_retries=0)
+        return OpenAI(
+            base_url=base_url,
+            api_key=api_key or "none",
+            max_retries=0,
+            timeout=httpx.Timeout(60.0, connect=10.0),
+        )
 
     def chat(self, messages: list[dict], model: str | None = None, max_tokens: int = 8192) -> str:
         client = self._get_client()

@@ -63,12 +63,16 @@ def _rrf(ranked_lists: list[list[str]], k: int = 60) -> dict[str, float]:
     return scores
 
 
+def _esc(val: str) -> str:
+    return val.replace("'", "''")
+
+
 def _build_where(topic: str | None, subtopic: str | None) -> str | None:
     parts = []
     if topic:
-        parts.append(f"topic = '{topic.lower()}'")
+        parts.append(f"topic = '{_esc(topic.lower())}'")
     if subtopic:
-        parts.append(f"subtopic = '{subtopic.lower()}'")
+        parts.append(f"subtopic = '{_esc(subtopic.lower())}'")
     return " AND ".join(parts) if parts else None
 
 

@@ -1,34 +1,87 @@
-"""Chunk enrichment — programmatic (KeyBERT, spaCy) + LLM-based."""
+"""Chunk enrichment — programmatic (KeyBERT, spaCy) + multi-stage LLM pipeline."""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
+import threading
 import time
 from pathlib import Path
 
+log = logging.getLogger(__name__)
+
+# ── Singletons (thread-safe) ────────────────────────────────────────
+
 _enrichment_cache: dict[str, dict] | None = None
+_cache_lock = threading.Lock()
+_kw_model = None
+_kw_lock = threading.Lock()
+_nlp = None
+_nlp_lock = threading.Lock()
 
 
 def _get_enrichment_cache() -> dict[str, dict]:
     global _enrichment_cache
-    if _enrichment_cache is None:
-        cache_path = Path(__file__).resolve().parents[3] / ".enrichment_cache.json"
-        if cache_path.exists():
-            _enrichment_cache = json.loads(cache_path.read_text())
-            print(f"  [enrich] Loaded {len(_enrichment_cache)} cached enrichments")
-        else:
-            _enrichment_cache = {}
+    with _cache_lock:
+        if _enrichment_cache is None:
+            cache_path = Path(__file__).resolve().parents[3] / ".enrichment_cache.json"
+            if cache_path.exists():
+                try:
+                    _enrichment_cache = json.loads(cache_path.read_text())
+                    print(f"  [enrich] Loaded {len(_enrichment_cache)} cached enrichments")
+                except (json.JSONDecodeError, OSError) as e:
+                    print(f"  [enrich] Cache file corrupt, starting fresh: {e}")
+                    _enrichment_cache = {}
+            else:
+                _enrichment_cache = {}
     return _enrichment_cache
+
+
+def _get_kw_model():
+    global _kw_model
+    with _kw_lock:
+        if _kw_model is None:
+            from keybert import KeyBERT
+            print("  [enrich] Loading KeyBERT model...")
+            _kw_model = KeyBERT(model="all-MiniLM-L6-v2")
+            print("  [enrich] KeyBERT ready.")
+    return _kw_model
+
+
+def _get_nlp():
+    global _nlp
+    with _nlp_lock:
+        if _nlp is None:
+            import spacy
+            try:
+                _nlp = spacy.load("en_core_web_sm")
+            except OSError:
+                spacy.cli.download("en_core_web_sm")
+                _nlp = spacy.load("en_core_web_sm")
+            print("  [enrich] spaCy ready.")
+    return _nlp
 
 
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
 
+def _save_enrichment_cache():
+    """Persist the in-memory enrichment cache to disk."""
+    if _enrichment_cache is None:
+        return
+    cache_path = Path(__file__).resolve().parents[3] / ".enrichment_cache.json"
+    try:
+        cache_path.write_text(json.dumps(_enrichment_cache, indent=2, default=str))
+    except OSError as e:
+        print(f"  [enrich] Failed to save cache: {e}")
+
+
+# ── JSON extraction ─────────────────────────────────────────────────
+
 def _extract_json(response: str) -> list[dict]:
-    """Extract JSON array from LLM response, handling common malformations."""
     if not response:
         raise ValueError("Empty response")
 
@@ -54,49 +107,20 @@ def _extract_json(response: str) -> list[dict]:
         results = [results]
     return results
 
-_kw_model = None
-_nlp = None
 
-
-def _get_kw_model():
-    global _kw_model
-    if _kw_model is None:
-        from keybert import KeyBERT
-        print("  [enrich] Loading KeyBERT model...")
-        _kw_model = KeyBERT(model="all-MiniLM-L6-v2")
-        print("  [enrich] KeyBERT ready.")
-    return _kw_model
-
-
-def _get_nlp():
-    global _nlp
-    if _nlp is None:
-        import spacy
-        try:
-            _nlp = spacy.load("en_core_web_sm")
-        except OSError:
-            spacy.cli.download("en_core_web_sm")
-            _nlp = spacy.load("en_core_web_sm")
-        print("  [enrich] spaCy ready.")
-    return _nlp
-
+# ── Programmatic enrichment (no LLM) ────────────────────────────────
 
 def enrich_programmatic(chunks: list[dict]) -> list[dict]:
-    """Add keywords and entities to chunks without LLM calls."""
     texts = [c["text"] for c in chunks]
-
     keywords_list = _extract_keywords_batch(texts)
     entities_list = _extract_entities_batch(texts)
-
     for chunk, kws, ents in zip(chunks, keywords_list, entities_list):
         chunk["keywords"] = ", ".join(kws)
         chunk["entities"] = json.dumps(ents) if ents else ""
-
     return chunks
 
 
 def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
-    """Extract keywords using KeyBERT."""
     try:
         kw_model = _get_kw_model()
         results = []
@@ -105,12 +129,8 @@ def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
                 results.append([])
                 continue
             kws = kw_model.extract_keywords(
-                text,
-                keyphrase_ngram_range=(1, 2),
-                stop_words="english",
-                top_n=6,
-                use_mmr=True,
-                diversity=0.5,
+                text, keyphrase_ngram_range=(1, 2),
+                stop_words="english", top_n=6, use_mmr=True, diversity=0.5,
             )
             results.append([kw for kw, _ in kws])
         return results
@@ -120,7 +140,6 @@ def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
 
 
 def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
-    """Extract named entities using spaCy."""
     try:
         nlp = _get_nlp()
         results = []
@@ -140,6 +159,8 @@ def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
         return [[] for _ in texts]
 
 
+# ── Prompts ──────────────────────────────────────────────────────────
+
 _CHUNK_ENRICH_PROMPT = """You are analyzing passages from "{book_title}"{section_context}.
 
 For each passage, return a JSON array with one object per passage containing:
@@ -155,22 +176,6 @@ Return ONLY a valid JSON array, no other text.
 Passages:
 {chunks}"""
 
-_SECTION_SUMMARY_PROMPT = """You are reading a section of "{book_title}".
-Section: {section_name}
-
-Below is the full text of this section. Write a structured summary.
-
-Return a JSON object with:
-- "summary": 3-5 sentence summary capturing the key argument and conclusions
-- "key_concepts": Array of 3-8 main concepts or ideas discussed
-- "key_entities": Array of people, organizations, or works mentioned
-- "importance_adjustments": Array of objects {{"chunk_index": N, "importance": 1-5}} for any passages whose importance you'd adjust now that you see the full section context
-
-Return ONLY valid JSON, no other text.
-
-Section text:
-{section_text}"""
-
 _SECTION_PROGRESSIVE_PROMPT = """You are reading "{book_title}", section "{section_name}".
 
 Here is your running summary so far:
@@ -181,6 +186,7 @@ Now read the next passages and update your summary.
 Return a JSON object with:
 - "running_summary": Updated 3-5 sentence summary incorporating the new material
 - "key_concepts": Updated array of main concepts (add new ones, keep existing)
+- "key_entities": Array of people, organizations, or works mentioned so far
 - "chunk_titles": Array of objects {{"title": "...", "importance": 1-5}} one per passage below
 
 Return ONLY valid JSON, no other text.
@@ -207,45 +213,122 @@ Section summaries:
 {section_summaries}"""
 
 
+# ── LLM call infrastructure ─────────────────────────────────────────
+
 _FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
     "google/gemma-3-12b-it:free",
 ]
 
 
-def _llm_call_with_retry(provider, messages, max_retries: int = 3) -> str:
-    """LLM call with exponential backoff on rate limits + fallback on content moderation."""
+class _ModerationBlock(Exception):
+    pass
+
+
+class _RateLimit(Exception):
+    pass
+
+
+class _Timeout(Exception):
+    pass
+
+
+def _classify_error(e: Exception) -> Exception:
+    err_str = str(e)
+    err_type = type(e).__name__.lower()
+    if "403" in err_str or "moderation" in err_str.lower() or "flagged" in err_str.lower():
+        return _ModerationBlock(err_str)
+    if "429" in err_str or "rate" in err_str.lower():
+        return _RateLimit(err_str)
+    if "timeout" in err_str.lower() or "timed out" in err_str.lower() or "timeout" in err_type:
+        return _Timeout(err_str)
+    return e
+
+
+def _llm_call(provider, messages, model=None) -> str:
+    try:
+        response = provider.chat(messages, model=model)
+        if response is None:
+            raise ValueError("Provider returned None")
+        return response
+    except (_ModerationBlock, _RateLimit, _Timeout):
+        raise
+    except Exception as e:
+        raise _classify_error(e) from e
+
+
+def _llm_call_with_retry(provider, messages, max_retries: int = 2) -> str:
+    """Retry on rate limits and timeouts. Raises _ModerationBlock immediately."""
     for attempt in range(max_retries + 1):
         try:
-            response = provider.chat(messages, model=None)
-            if response is None:
-                raise ValueError("Provider returned None")
-            return response
-        except Exception as e:
-            err_str = str(e)
-            is_rate_limit = "429" in err_str or "rate" in err_str.lower()
-            is_moderation = "403" in err_str or "moderation" in err_str.lower() or "flagged" in err_str.lower()
-
-            if is_moderation:
-                print(f"  [enrich] Content moderation block, trying fallback models...")
-                for fallback in _FALLBACK_MODELS:
-                    try:
-                        response = provider.chat(messages, model=fallback)
-                        if response is None:
-                            continue
-                        print(f"  [enrich] Fallback succeeded: {fallback}")
-                        return response
-                    except Exception:
-                        continue
-                raise
-
-            if is_rate_limit and attempt < max_retries:
+            return _llm_call(provider, messages)
+        except _ModerationBlock:
+            raise
+        except (_RateLimit, _Timeout):
+            if attempt < max_retries:
                 wait = 2 ** attempt * 3
-                print(f"  [enrich] Rate limited, waiting {wait}s (attempt {attempt + 1}/{max_retries})...")
+                print(f"  [enrich] Retryable error, waiting {wait}s (attempt {attempt + 1}/{max_retries})...")
                 time.sleep(wait)
                 continue
             raise
+        except Exception:
+            if attempt < max_retries:
+                continue
+            raise
 
+
+def _llm_call_with_fallback(provider, messages) -> str:
+    """Try fallback models. Used in end-of-stage retry pass."""
+    errors = []
+    for fallback in _FALLBACK_MODELS:
+        try:
+            response = _llm_call(provider, messages, model=fallback)
+            print(f"  [enrich] Fallback succeeded: {fallback}")
+            return response
+        except _RateLimit:
+            errors.append(f"{fallback}: rate limited")
+            time.sleep(8)
+            continue
+        except Exception as e:
+            errors.append(f"{fallback}: {e}")
+            continue
+    raise RuntimeError(f"All fallback models failed: {'; '.join(errors)}")
+
+
+# ── Chunk field helpers ──────────────────────────────────────────────
+
+_CHUNK_FIELDS = ("title", "summary", "keywords", "concept_tags", "importance", "semantic_key")
+_CACHE_FIELDS = ("title", "summary", "keywords", "concept_tags", "importance", "questions", "semantic_key")
+
+
+def _apply_enrichment(chunk: dict, enrichment: dict):
+    """Apply enrichment data to a chunk. All-or-nothing — doesn't partial write. Also caches."""
+    update = {
+        "title": enrichment.get("title", ""),
+        "summary": enrichment.get("summary", ""),
+        "keywords": ", ".join(enrichment.get("tags", [])),
+        "concept_tags": ", ".join(enrichment.get("concept_tags", [])),
+        "importance": int(enrichment.get("importance", 3)),
+        "semantic_key": enrichment.get("semantic_key", ""),
+    }
+    chunk.update(update)
+
+    cache = _get_enrichment_cache()
+    h = _content_hash(chunk.get("text", ""))
+    if h:
+        cache[h] = {k: v for k, v in update.items()}
+
+
+def _apply_cache(chunk: dict, cached: dict):
+    """Apply cached enrichment including concept_tags and importance."""
+    for field in _CACHE_FIELDS:
+        if cached.get(field):
+            chunk[field] = cached[field]
+    if "importance" not in chunk or chunk.get("importance") is None:
+        chunk["importance"] = 3
+
+
+# ── Stage 2: Chunk-level enrichment ─────────────────────────────────
 
 _MAX_TOKENS_PER_PASS = 5000
 
@@ -257,7 +340,7 @@ def enrich_chunks_stage2(
     calls_per_min: float = 7.5,
     on_progress=None,
 ) -> list[dict]:
-    """Stage 2: Chunk-level titles, tags, importance. Context-aware."""
+    """Stage 2: Chunk-level titles, tags, concept_tags, importance. Context-aware."""
     min_interval = 60.0 / calls_per_min
     cache = _get_enrichment_cache()
     batch_size = 5
@@ -269,10 +352,7 @@ def enrich_chunks_stage2(
             continue
         h = _content_hash(c["text"])
         if h in cache:
-            cached = cache[h]
-            for field in ("title", "summary", "keywords", "questions", "semantic_key"):
-                if cached.get(field):
-                    c[field] = cached[field]
+            _apply_cache(c, cache[h])
             cached_count += 1
         else:
             enrichable.append((i, c))
@@ -281,7 +361,7 @@ def enrich_chunks_stage2(
     print(f"  [stage2] Chunk enrichment: {cached_count} cached, {len(enrichable)} need LLM ({total_batches} batches)")
 
     last_call = 0.0
-    failed: list[list[tuple[int, dict]]] = []
+    failed: list[tuple[list[tuple[int, dict]], str]] = []
 
     for batch_start in range(0, len(enrichable), batch_size):
         batch = enrichable[batch_start:batch_start + batch_size]
@@ -301,51 +381,54 @@ def enrich_chunks_stage2(
         for idx, (_, chunk) in enumerate(batch):
             chunks_text += f"\n--- Passage {idx + 1} ---\n{chunk['text']}\n"
 
+        prompt = _CHUNK_ENRICH_PROMPT.format(
+            book_title=book_title or "Unknown",
+            section_context=section_ctx,
+            chunks=chunks_text,
+        )
+
         try:
             last_call = time.time()
+            response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
+            results = _extract_json(response)
+
+            if len(results) != len(batch):
+                print(f"  [stage2] Batch {batch_num}: expected {len(batch)} results, got {len(results)} — marking failed")
+                failed.append((batch, section_ctx))
+                continue
+
+            for (orig_idx, chunk), enrichment in zip(batch, results):
+                _apply_enrichment(chunk, enrichment)
+        except Exception as e:
+            print(f"  [stage2] Batch {batch_num} failed: {type(e).__name__}")
+            failed.append((batch, section_ctx))
+
+    if failed:
+        print(f"  [stage2] Retrying {len(failed)} failed batches with fallback models...")
+        for batch, section_ctx in failed:
+            time.sleep(min_interval)
+            chunks_text = "\n".join(f"--- Passage {i+1} ---\n{c['text']}" for i, (_, c) in enumerate(batch))
             prompt = _CHUNK_ENRICH_PROMPT.format(
                 book_title=book_title or "Unknown",
                 section_context=section_ctx,
                 chunks=chunks_text,
             )
-            response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
-            results = _extract_json(response)
-
-            for (orig_idx, chunk), enrichment in zip(batch, results):
-                chunk["title"] = enrichment.get("title", "")
-                chunk["summary"] = enrichment.get("summary", "")
-                chunk["keywords"] = ", ".join(enrichment.get("tags", []))
-                chunk["concept_tags"] = ", ".join(enrichment.get("concept_tags", []))
-                chunk["importance"] = int(enrichment.get("importance", 3))
-                chunk["semantic_key"] = enrichment.get("semantic_key", "")
-        except Exception as e:
-            print(f"  [stage2] Batch {batch_num} failed: {e}")
-            failed.append(batch)
-
-    if failed:
-        print(f"  [stage2] Retrying {len(failed)} failed batches...")
-        for batch in failed:
-            elapsed = time.time() - last_call
-            if last_call > 0 and elapsed < min_interval:
-                time.sleep(min_interval - elapsed)
             try:
-                last_call = time.time()
-                chunks_text = "\n".join(f"--- Passage {i+1} ---\n{c['text']}" for i, (_, c) in enumerate(batch))
-                prompt = _CHUNK_ENRICH_PROMPT.format(book_title=book_title or "Unknown", section_context="", chunks=chunks_text)
-                response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
+                response = _llm_call_with_fallback(provider, [{"role": "user", "content": prompt}])
                 results = _extract_json(response)
-                for (orig_idx, chunk), enrichment in zip(batch, results):
-                    chunk["title"] = enrichment.get("title", "")
-                    chunk["summary"] = enrichment.get("summary", "")
-                    chunk["keywords"] = ", ".join(enrichment.get("tags", []))
-                    chunk["concept_tags"] = ", ".join(enrichment.get("concept_tags", []))
-                    chunk["importance"] = int(enrichment.get("importance", 3))
-                    chunk["semantic_key"] = enrichment.get("semantic_key", "")
+                if len(results) != len(batch):
+                    print(f"  [stage2] Fallback returned {len(results)} results for {len(batch)} chunks — skipping")
+                else:
+                    for (orig_idx, chunk), enrichment in zip(batch, results):
+                        _apply_enrichment(chunk, enrichment)
             except Exception as e:
-                print(f"  [stage2] Retry failed: {e}")
+                print(f"  [stage2] Retry permanently failed: {e}")
 
+    _save_enrichment_cache()
     return chunks
 
+
+# ── Stage 3: Section/chapter summaries ──────────────────────────────
 
 def enrich_section_stage3(
     section_chunks: list[dict],
@@ -355,10 +438,11 @@ def enrich_section_stage3(
     calls_per_min: float = 7.5,
     on_progress=None,
 ) -> dict:
-    """Stage 3: Section/chapter summary via progressive passes over original text.
+    """Stage 3: Section summary via progressive passes over original text.
 
-    Always uses progressive passes regardless of section size — consistent
-    chunked output, running summary builds incrementally.
+    Always uses progressive passes. Failed passes are retried at end
+    with fallback models using the running_summary state from just
+    before the failure.
     """
     min_interval = 60.0 / calls_per_min
 
@@ -380,18 +464,20 @@ def enrich_section_stage3(
     print(f"  [stage3] Section '{section_name}': {total_passes} passes over {len(section_chunks)} chunks")
 
     running_summary = "No summary yet — this is the first pass."
-    all_key_concepts = []
-    all_key_entities = []
-    chunk_titles = []
-    failed_passes: list[tuple[int, list[dict]]] = []
+    all_key_concepts: list[str] = []
+    all_key_entities: list[str] = []
+    chunk_titles: list[dict] = []
+    failed_passes: list[tuple[int, list[dict], str]] = []
+    last_call = 0.0
 
     for i, batch in enumerate(batches):
         if on_progress:
             on_progress(section_name, i + 1, total_passes)
 
-        elapsed = time.time() - (getattr(enrich_section_stage3, '_last_call', 0))
-        if i > 0 and elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
+        if i > 0:
+            elapsed = time.time() - last_call
+            if elapsed < min_interval:
+                time.sleep(min_interval - elapsed)
 
         chunks_text = "\n\n".join(bc["text"] for bc in batch)
         prompt = _SECTION_PROGRESSIVE_PROMPT.format(
@@ -400,8 +486,11 @@ def enrich_section_stage3(
             running_summary=running_summary,
             chunks=chunks_text,
         )
+
+        summary_before_pass = running_summary
+
         try:
-            enrich_section_stage3._last_call = time.time()
+            last_call = time.time()
             response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
             result = _extract_json(response)
             if isinstance(result, list):
@@ -411,30 +500,37 @@ def enrich_section_stage3(
             for concept in result.get("key_concepts", []):
                 if concept not in all_key_concepts:
                     all_key_concepts.append(concept)
+            for entity in result.get("key_entities", []):
+                if entity not in all_key_entities:
+                    all_key_entities.append(entity)
         except Exception as e:
-            print(f"  [stage3] Pass {i+1}/{total_passes} failed: {e}")
-            failed_passes.append((i, batch))
+            print(f"  [stage3] Pass {i+1}/{total_passes} failed: {type(e).__name__}")
+            failed_passes.append((i, batch, summary_before_pass))
 
     if failed_passes:
-        print(f"  [stage3] Retrying {len(failed_passes)} failed passes...")
-        for pass_idx, batch in failed_passes:
+        print(f"  [stage3] Retrying {len(failed_passes)} failed passes with fallback models...")
+        for pass_idx, batch, summary_at_failure in failed_passes:
             time.sleep(min_interval)
             chunks_text = "\n\n".join(bc["text"] for bc in batch)
             prompt = _SECTION_PROGRESSIVE_PROMPT.format(
                 book_title=book_title or "Unknown",
                 section_name=section_name,
-                running_summary=running_summary,
+                running_summary=summary_at_failure,
                 chunks=chunks_text,
             )
             try:
-                response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
+                response = _llm_call_with_fallback(provider, [{"role": "user", "content": prompt}])
                 result = _extract_json(response)
                 if isinstance(result, list):
                     result = result[0]
-                running_summary = result.get("running_summary", running_summary)
-                chunk_titles.extend(result.get("chunk_titles", []))
+                for concept in result.get("key_concepts", []):
+                    if concept not in all_key_concepts:
+                        all_key_concepts.append(concept)
+                for entity in result.get("key_entities", []):
+                    if entity not in all_key_entities:
+                        all_key_entities.append(entity)
             except Exception as e:
-                print(f"  [stage3] Retry pass {pass_idx+1} failed again: {e}")
+                print(f"  [stage3] Retry pass {pass_idx+1} permanently failed: {e}")
 
     return {
         "summary": running_summary,
@@ -444,6 +540,8 @@ def enrich_section_stage3(
     }
 
 
+# ── Stage 4: Book-level summary ─────────────────────────────────────
+
 def enrich_book_stage4(
     section_summaries: list[dict],
     provider,
@@ -451,7 +549,6 @@ def enrich_book_stage4(
     author: str = "",
     toc: list[str] | None = None,
 ) -> dict:
-    """Stage 4: Book-level summary from section summaries."""
     toc_text = "\n".join(f"- {t}" for t in (toc or []))
     summaries_text = "\n\n".join(
         f"### {s.get('section', 'Unknown')}\n{s.get('summary', '')}"
@@ -470,89 +567,5 @@ def enrich_book_stage4(
             result = result[0]
         return result
     except Exception as e:
-        print(f"  [stage4] Book summary failed: {e}")
-        return {"overview": "", "main_themes": [], "key_takeaways": [], "tags": []}
-
-
-def enrich_llm(chunks: list[dict], provider, batch_size: int = 5, calls_per_min: float = 7.5, on_progress=None) -> list[dict]:
-    """Legacy wrapper — runs stage 2 chunk enrichment. Use enrich_chunks_stage2 for new code.
-
-    Batches multiple chunks per LLM call for efficiency.
-    Throttles to calls_per_min to avoid rate limits on free tiers.
-    on_progress: optional callback(batch_num, total_batches, cached_count) for live status.
-    """
-    min_interval = 60.0 / calls_per_min
-    cache = _get_enrichment_cache()
-
-    enrichable = []
-    cached_count = 0
-    for i, c in enumerate(chunks):
-        if len(c["text"].split()) < 15:
-            continue
-        h = _content_hash(c["text"])
-        if h in cache:
-            cached = cache[h]
-            c["title"] = cached.get("title", "")
-            c["summary"] = cached.get("summary", "")
-            c["keywords"] = cached.get("keywords", c.get("keywords", ""))
-            c["questions"] = cached.get("questions", "")
-            c["semantic_key"] = cached.get("semantic_key", "")
-            cached_count += 1
-        else:
-            enrichable.append((i, c))
-
-    total_batches = (len(enrichable) + batch_size - 1) // batch_size
-    print(f"  [enrich] LLM enrichment: {cached_count} from cache, {len(enrichable)} need LLM ({total_batches} batches)")
-
-    failed_batches: list[list[tuple[int, dict]]] = []
-    last_call = 0.0
-
-    def _run_batch(batch: list[tuple[int, dict]], batch_label: str) -> bool:
-        nonlocal last_call
-        elapsed = time.time() - last_call
-        if last_call > 0 and elapsed < min_interval:
-            time.sleep(min_interval - elapsed)
-
-        print(f"  [enrich] {batch_label}...")
-
-        chunks_text = ""
-        for idx, (_, chunk) in enumerate(batch):
-            chunks_text += f"\n--- Chunk {idx + 1} ---\n{chunk['text']}\n"
-
-        try:
-            last_call = time.time()
-            prompt = _ENRICH_PROMPT.format(chunks=chunks_text)
-            response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
-            results = _extract_json(response)
-
-            for (orig_idx, chunk), enrichment in zip(batch, results):
-                chunk["title"] = enrichment.get("title", "")
-                chunk["summary"] = enrichment.get("summary", "")
-                chunk["keywords"] = ", ".join(enrichment.get("tags", []))
-                chunk["questions"] = json.dumps(enrichment.get("questions", []))
-                chunk["semantic_key"] = enrichment.get("semantic_key", "")
-            return True
-        except Exception as e:
-            print(f"  [enrich] Failed: {e}")
-            return False
-
-    for batch_start in range(0, len(enrichable), batch_size):
-        batch = enrichable[batch_start:batch_start + batch_size]
-        batch_num = batch_start // batch_size + 1
-        if on_progress:
-            on_progress(batch_num, total_batches, cached_count)
-        if not _run_batch(batch, f"Batch {batch_num}/{total_batches}"):
-            failed_batches.append(batch)
-
-    if failed_batches:
-        print(f"  [enrich] Retrying {len(failed_batches)} failed batches...")
-        still_failed = 0
-        for i, batch in enumerate(failed_batches):
-            if on_progress:
-                on_progress(total_batches + i + 1, total_batches + len(failed_batches), cached_count)
-            if not _run_batch(batch, f"Retry {i+1}/{len(failed_batches)}"):
-                still_failed += 1
-        if still_failed:
-            print(f"  [enrich] {still_failed} batches permanently failed")
-
-    return chunks
+        print(f"  [stage4] Book summary failed: {type(e).__name__}: {e}")
+        return {"overview": "", "main_themes": [], "key_takeaways": [], "tags": [], "_error": str(e)}
