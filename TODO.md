@@ -13,21 +13,21 @@
 
 ## Cross-Source Connections
 All computed locally from existing data (embeddings, NER entities, keywords) — no LLM calls needed.
-- [ ] Fuzzy entity merging via rapidfuzz (Jaro-Winkler) — prerequisite for entity work ("Einstein" / "A. Einstein" / "Albert Einstein" -> same entity)
+- [x] Fuzzy entity merging via rapidfuzz (Jaro-Winkler) — normalizes, filters noise, clusters variants into canonical entities. EntityIndex at ~/.lore/entity_index.json
 - [ ] Entity co-occurrence graph weighted by NPMI + Louvain community detection (NetworkX). Finds non-obvious cross-source bridges. See BlueGraph for reference
 - [ ] BERTopic topic clustering on existing embeddings (UMAP+HDBSCAN) with hierarchical mode for multi-level granularity (chunk < subtopic < topic < theme). Known M1 stability issues at scale — test early, fall back to UMAP+GMM (RAPTOR approach) if needed
 - [ ] Bipartite graph projection — project chunks through shared entities, keywords, or tags for multi-dimensional chunk-chunk connections. Build after entity co-occurrence to evaluate incremental value
 - [ ] Jaccard similarity on keyword/tag sets between chunks — index-time relationship discovery (different from BM25 which is query-time matching)
 - [ ] TF-IDF pairwise similarity as third RRF signal — ensemble of metrics gives ~40% improvement over single metric (USMB 2025). Different signal from embedding cosine even if overlap exists
 - [ ] PMI/NPMI on KeyBERT keywords across documents — finds statistically surprising associations between sources. Needs enrichment running first
-- [ ] `find_related(chunk_id)` / `find_connections(collection)` MCP tools to expose connections to agents
+- [x] `find_related(chunk_id, entity)` + `entity_index(rebuild)` MCP tools — cross-source entity connections + index management
 
 ## Agent Alignment
 
 ### Agent Onboarding (AX — agent experience)
 Progressive disclosure for the agent itself: base knowledge automatic, deeper knowledge available, power features opt-in.
 - [x] Layer 1: Dynamic MCP instructions — on connect, agent automatically sees: collection count, topic list, total chunks, one-line usage guide. No tool call needed, just a smarter instructions string that reads current state
-- [ ] Layer 2: `intro` tool — on-demand deep orientation. Returns structured data: collections with summaries, suggested workflows (compact search -> expand -> get_context), ingestion nudges ("if you find YouTube links or PDFs on this topic, ingest them for deeper research"). Makes the agent want to use Lore proactively
+- [x] Layer 2: `intro` tool — deep orientation with collection summaries (from book_summary.json), theme/tag aggregation, cross-source entities, usage stats (top queries, most accessed chunks), suggested workflows, and tips. Dynamic content from archive + interaction logs
 - [ ] Layer 3: `/lore` Claude Code skill — loads full workflow prompt template. Teaches optimal patterns, available tools, tips. Power user opt-in, similar to claude-mem's skill approach
 
 ### Retrieval UX
@@ -38,8 +38,8 @@ Progressive disclosure for the agent itself: base knowledge automatic, deeper kn
 
 ### Session Intelligence
 - [x] Session-aware search — deprioritize already-fetched chunks by 50% score penalty (not filtered, still findable). Queries interaction log for session's fetched chunk IDs
-- [ ] TTL-based re-eligibility (chunks become full-score again after N minutes)
-- [ ] `reset_session` param for agent to signal compaction happened
+- [x] TTL-based re-eligibility — chunks regain full score after 30 min (configurable via search.session_ttl_minutes)
+- [x] `reset_session` MCP tool — agent signals context compaction, clears fetch history immediately
 - [ ] "Related" section in search results — Rocchio + MMR recommendations shown separately from main results, clearly labeled with WHY ("similar to chunks you read about X and Y"). Main results stay unbiased, related section adds session-informed suggestions
 - [ ] Implicit feedback via Rocchio + MMR — maintain centroid of fetched-chunk embeddings per session, retrieve nearest neighbors, rerank with MMR (lambda ~0.7) to ensure diversity. Prevents echo chamber while keeping relevance. Use ONLY for the "related" section, never bias main results
 - [ ] Future: chunk co-occurrence patterns from session logs — learn which chunks get fetched together across sessions as blended signal for recommendations
@@ -144,6 +144,7 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 - [ ] Fallback chain: try sampling first, fall back to configured provider, fall back to skip LLM enrichment (keywords/entities only)
 
 ## Later
+- [ ] **Multimodal document parsing** — research Docling (IBM, lighter) vs MinerU (heavier, better OCR) as optional PDF parser. Extract images/tables/equations as separate content blocks. VLM descriptions (MCP sampling or local LLaVA) turn images into searchable text chunks. Tables → markdown, equations → LaTeX preserved. Fits as "Stage 0" before existing enrichment pipeline. See RAG-Anything (HKUDS) for reference architecture
 - [ ] Frontend rework
 - [ ] DMG packaging via Tauri sidecar
 - [ ] Local enrichment model — Gemma 4 E4B via Ollama (~5GB Q4, ~40-60 tok/s on M1, native JSON output). Runner-up: Qwen 3.5 4B (~2.5GB, faster). Replace OpenRouter enrichment calls with local inference for fully offline pipeline
