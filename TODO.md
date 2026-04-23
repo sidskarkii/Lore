@@ -4,7 +4,7 @@
 
 ## Context Engineering
 - [x] Entity-boosted search: extract entities from query, match against stored entities, boost chunks with entity overlap as third RRF signal
-- [ ] System prompt rework for RAG harness
+- [x] System prompt rework — dynamic state (chunks, collections, topics, cross-source hints, provider status), numbered retrieval loop with token costs, anti-patterns, step numbers in tool descriptions
 
 ## Source Structure & Navigation
 - [x] Domain-specific chunk IDs: EPUB {name}_ch_{chapter}_{passage}, PDF {name}_{section}_p{page}_{passage}, video {name}_{ep}_t{MM}m{SS}s, code {name}_{path}_L{range}, web {name}_{section}_{passage}. get_context reads metadata from store (no regex parsing)
@@ -14,6 +14,7 @@
 ## Cross-Source Connections
 All computed locally from existing data (embeddings, NER entities, keywords) — no LLM calls needed.
 - [x] Fuzzy entity merging via rapidfuzz (Jaro-Winkler) — normalizes, filters noise, clusters variants into canonical entities. EntityIndex at ~/.lore/entity_index.json
+- [ ] Entity noise filtering improvements — "chapter 2" as entity, generic names (Louis, Johnson, Georgia) merging incorrectly, structural references leaking through. Add structural stop words, raise JW threshold for short names, filter chapter/section references
 - [ ] Entity co-occurrence graph weighted by NPMI + Louvain community detection (NetworkX). Finds non-obvious cross-source bridges. See BlueGraph for reference
 - [ ] BERTopic topic clustering on existing embeddings (UMAP+HDBSCAN) with hierarchical mode for multi-level granularity (chunk < subtopic < topic < theme). Known M1 stability issues at scale — test early, fall back to UMAP+GMM (RAPTOR approach) if needed
 - [ ] Bipartite graph projection — project chunks through shared entities, keywords, or tags for multi-dimensional chunk-chunk connections. Build after entity co-occurrence to evaluate incremental value
@@ -81,10 +82,12 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 ### Stage improvements needed
 - [ ] Always chunked output — even if section fits in context, consistent 5000 tok passes for predictable behavior
 - [ ] Same session/conversation thread for continuity across progressive passes within a section
-- [ ] Importance scores feeding into search ranking — high importance chunks get score boost
-- [ ] Per-section progress reporting in stage 3 (currently just "Stage 3: section summaries..." with no section-level detail)
-- [ ] Retry failed sections in stage 3 (currently silently returns empty)
-- [ ] Stage 2 context enhancement: include surrounding chunk keywords/entities to give the model more awareness of neighboring content
+- [x] Importance scores feeding into search ranking — weight 0.1 boost via _apply_rating_boost
+- [x] Per-section progress reporting in stage 3 — _sec_progress callback with section name + pass count
+- [x] Retry failed sections in stage 3 — failed_passes list retried with fallback models, summary/titles now recovered
+- [x] Stage 2 context enhancement — rolling key dictionary (MDKeyChunker-style), Stage 1 cues as hints, prev chunk context, system/user prompt split, few-shot example, importance rubric
+- [x] Enrichment pipeline v2 — 10 fields per chunk (added questions, self_contained, confidence, why_important), concept ledger in Stage 3, concept aggregation in Stage 4
+- [ ] Full re-ingest with v2 enrichment prompts — old cache bypassed (missing questions field), all chunks get rolling key consistency + new fields
 
 ### MCP sampling integration
 - [ ] MCP sampling as DEFAULT for all stages — harness model does the enrichment, zero config, no API key needed
@@ -122,7 +125,7 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 - [ ] Code-to-docs cross-referencing — match symbol names from tree-sitter (classes, functions) against mentions in ingested docs. Feeds into entity co-occurrence graph as high-confidence connections
 
 ## Extractors
-- [ ] PDF: tune heading detection heuristics (some figure captions picked up as headings)
+- [ ] PDF: tune heading detection heuristics — page numbers, inline questions, and code fragments picked up as headings. Seen in DeepSeek, LangChain PDFs
 - [ ] PDF: fix code block fragmentation on blank lines within code
 
 ## Ingestion
@@ -130,7 +133,7 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 
 ## Enrichment
 - [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model (~80MB savings) — compare quality first before replacing
-- [x] Robust JSON extraction for LLM enrichment — sanitize control chars, regex fallback for malformed responses
+- [x] Robust JSON extraction for LLM enrichment — strips backtick fences, trailing commas, single-quoted JSON, prose-wrapped output. Picks longest valid match from [...] or {...}
 - [x] Enrichment cache by content hash — skip LLM for already-enriched chunks on re-ingest
 - [x] Rate limiting (7.5 calls/min) + exponential backoff on 429s
 - [x] Retry queue — failed batches re-attempted after first pass
@@ -144,6 +147,7 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 - [ ] Fallback chain: try sampling first, fall back to configured provider, fall back to skip LLM enrichment (keywords/entities only)
 
 ## Later
+- [ ] **Auto-ingest on WebFetch** — configurable domain whitelist (arxiv.org, github.com, etc). URLs fetched from whitelisted domains auto-queue for background ingestion. Config: auto_ingest.domains + auto_ingest.topic. Builds KB passively during research sessions
 - [ ] **Multimodal document parsing** — research Docling (IBM, lighter) vs MinerU (heavier, better OCR) as optional PDF parser. Extract images/tables/equations as separate content blocks. VLM descriptions (MCP sampling or local LLaVA) turn images into searchable text chunks. Tables → markdown, equations → LaTeX preserved. Fits as "Stage 0" before existing enrichment pipeline. See RAG-Anything (HKUDS) for reference architecture
 - [ ] Frontend rework
 - [ ] DMG packaging via Tauri sidecar
@@ -170,7 +174,7 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 - [x] Chat route refactor: extracted shared helpers, dropped WebSocket endpoint
 - [x] Inline imports cleanup
 - [x] Removed all truncations in reranker, enrichment, contextual prefixes
-- [x] MCP server: 7 tools, streamable HTTP + stdio
+- [x] MCP server: 12 tools (intro, search, search_deep, get_context, get_toc, find_related, entity_index, reset_session, ingest, ingest_status, rate_result, delete_collection), streamable HTTP + stdio
 - [x] Search expand parameter + get_chunk_by_id
 - [x] EPUB extractor: recursive headings + code block preservation
 - [x] PDF extractor: font-aware code detection + heading detection, no OCR
@@ -185,3 +189,13 @@ Each stage gets ORIGINAL text — no telephone game. Earlier stages produce meta
 - [x] Web extractor markdown output
 - [x] get_context fix for document sources
 - [x] Full pipeline tested end-to-end
+- [x] Fuzzy entity merging via rapidfuzz Jaro-Winkler — normalizes, filters noise, clusters variants. EntityIndex persisted at ~/.lore/entity_index.json
+- [x] Entity-enhanced search — query entities expanded through index, chunk entities resolved to canonical forms, cross-unicode matching
+- [x] find_related + entity_index MCP tools for cross-source entity discovery
+- [x] intro tool (Layer 2 AX) — collection summaries, themes, tags, health, usage stats, cross-source entities, workflows, tips
+- [x] TTL re-eligibility (30 min default) + reset_session tool
+- [x] Tool consolidation (14→12): removed health + list_collections, absorbed into intro
+- [x] Critical bug fixes: atomic archive writes (backup-rename-restore), collection dedup race (lock + in-progress set), add_chunks chunk loss on rerun (episode-scoped dedup), section metadata smear on merge (largest block wins), stage 3 fallback summary recovery
+- [x] Hardened JSON extraction v2: backtick fences, trailing commas, single-quoted JSON, prose-wrapped output, longest-match selection
+- [x] Codex test suites: ingest pipeline (5 tests), unreviewed changes (3 tests), adversarial edge cases
+- [x] Batch ingest script with dotenv loading + deterministic file matching

@@ -358,7 +358,9 @@ class Store:
             rows = (
                 tbl.search()
                 .where(f"collection = '{_esc(collection)}'")
-                .select(["id", "entities", "keywords", "concept_tags", "collection", "episode_title", "source_type"])
+                .select(["id", "title", "summary", "entities", "keywords", "concept_tags",
+                         "importance", "collection", "episode_title", "source_type",
+                         "section_heading", "chapter"])
                 .limit(100_000)
                 .to_list()
             )

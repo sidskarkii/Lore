@@ -159,10 +159,12 @@ def test_stage3_fallback_drops_recovered_summary():
     def fallback(provider, messages):
         return json.dumps(
             {
-                "running_summary": "Recovered summary from fallback",
-                "key_concepts": ["concept-a"],
+                "section_summary": "Recovered summary from fallback",
+                "section_themes": ["concept-a"],
                 "key_entities": ["entity-a"],
-                "chunk_titles": [{"title": "Recovered title", "importance": 4}],
+                "ledger_updates": [],
+                "notable_points": ["Recovered point"],
+                "open_questions_or_tensions": [],
             }
         )
 
