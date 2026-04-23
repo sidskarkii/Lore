@@ -1,18 +1,24 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools:
-    search          — hybrid search (vector + BM25 + reranking)
-    search_deep     — multi-hop decomposition for complex queries
-    get_context     — expand around a search result or read a section
-    ingest          — auto-detect and ingest content (YouTube, file, URL, text)
-    list_collections — browse indexed collections
+Tools (12):
+    intro             — deep orientation: collections, summaries, health, workflows
+    search            — hybrid search (vector + BM25 + reranking)
+    search_deep       — multi-hop decomposition for complex queries
+    get_context       — expand around a search result or read a section
+    get_toc           — browse a collection's structure
+    find_related      — cross-source entity connections
+    entity_index      — view/rebuild the fuzzy entity index
+    reset_session     — clear fetch history after context compaction
+    ingest            — auto-detect and ingest content
+    ingest_status     — check ingestion progress
+    rate_result       — explicit feedback on search results
     delete_collection — remove a collection
-    health          — server status and stats
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import threading
 import uuid
@@ -72,10 +78,10 @@ def _build_instructions() -> str:
         pass
 
     base += (
-        " Use 'search' for most queries — results are compact by default (metadata "
-        "only, no full text). Scan scores and summaries, then call 'get_context' to "
-        "fetch full text for results you need. Use 'get_toc' to browse a collection's "
-        "structure. Use 'search_deep' for complex multi-topic questions."
+        " Call 'intro' for full orientation — collections, summaries, health, workflows. "
+        "Use 'search' for most queries (compact by default). Use 'get_context' to fetch "
+        "full text. Use 'search_deep' for complex multi-topic questions. Use 'find_related' "
+        "for cross-source entity connections."
     )
     return base
 
@@ -165,7 +171,193 @@ def _format_compact_result(r: dict) -> dict:
     return result
 
 
+def _load_book_summaries() -> dict[str, dict]:
+    """Load book summaries from archive for intro tool."""
+    cfg = get_config()
+    archive_dir = cfg.archive_dir
+    summaries = {}
+    if not archive_dir.exists():
+        return summaries
+    for coll_dir in archive_dir.iterdir():
+        if not coll_dir.is_dir():
+            continue
+        summary_file = coll_dir / "book_summary.json"
+        meta_file = coll_dir / "meta.json"
+        if not summary_file.exists():
+            continue
+        try:
+            summary = json.loads(summary_file.read_text())
+            meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
+            summaries[coll_dir.name] = {
+                "display_name": meta.get("collection_display", coll_dir.name),
+                "topic": meta.get("topic", ""),
+                "subtopic": meta.get("subtopic", ""),
+                "source_type": meta.get("source_type", ""),
+                "chunk_count": meta.get("chunk_count", 0),
+                "overview": summary.get("overview", ""),
+                "main_themes": summary.get("main_themes", []),
+                "tags": summary.get("tags", []),
+                "key_takeaways": summary.get("key_takeaways", []),
+            }
+        except (json.JSONDecodeError, OSError):
+            continue
+    return summaries
+
+
 def _register_tools(mcp: FastMCP) -> None:
+
+    # ── intro ───────────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def intro() -> dict:
+        """Deep orientation to the Lore knowledge base.
+
+        Call this once at the start of a session to understand what's
+        available, how to use it effectively, and what topics are covered.
+        Returns collection summaries, usage patterns, cross-source entities,
+        and workflow tips.
+
+        WHEN TO USE: At the beginning of a research session, or when you
+        want to understand the full scope of what Lore knows. After this,
+        you'll know exactly which collections to search and how to navigate.
+        """
+        try:
+            store = get_store()
+            collections = store.list_collections()
+            total_chunks = store.chunk_count()
+            book_summaries = _load_book_summaries()
+
+            coll_details = []
+            topic_map: dict[str, list[str]] = {}
+            all_tags: list[str] = []
+
+            for c in collections:
+                coll_id = c["collection"]
+                detail = {
+                    "collection": coll_id,
+                    "display_name": c["collection_display"],
+                    "topic": c["topic"],
+                    "subtopic": c["subtopic"],
+                    "episode_count": c["episode_count"],
+                }
+
+                bs = book_summaries.get(coll_id)
+                if bs:
+                    detail["overview"] = bs["overview"]
+                    themes = bs["main_themes"]
+                    if themes:
+                        detail["themes"] = [
+                            t.get("theme", t.get("title", "")) for t in themes
+                            if isinstance(t, dict)
+                        ][:5]
+                    detail["tags"] = bs.get("tags", [])
+                    detail["chunk_count"] = bs.get("chunk_count", 0)
+                    all_tags.extend(bs.get("tags", []))
+
+                coll_details.append(detail)
+                topic = c["topic"] or "uncategorized"
+                topic_map.setdefault(topic, []).append(c["collection_display"])
+
+            usage = {}
+            try:
+                db = get_database()
+                stats = db.get_interaction_stats()
+                usage["total_interactions"] = stats["total_interactions"]
+                usage["unique_sessions"] = stats["unique_sessions"]
+
+                top_queries = db.get_top_queries(5)
+                if top_queries:
+                    usage["popular_queries"] = top_queries
+
+                top_chunks = db.get_top_chunks(5)
+                if top_chunks:
+                    usage["most_accessed_chunks"] = top_chunks
+            except Exception:
+                pass
+
+            cross_source = []
+            try:
+                from ..core.entities import get_entity_index
+                idx = get_entity_index()
+                for c in idx.get_cross_source_entities()[:10]:
+                    cross_source.append({
+                        "entity": c.canonical,
+                        "type": c.entity_type,
+                        "sources": sorted(c.sources),
+                        "mentions": c.count,
+                    })
+            except Exception:
+                pass
+
+            tag_counts: dict[str, int] = {}
+            for t in all_tags:
+                tag_counts[t] = tag_counts.get(t, 0) + 1
+            top_tags = sorted(tag_counts.items(), key=lambda x: -x[1])[:15]
+
+            health_info = {}
+            try:
+                cfg = get_config()
+                registry = get_registry()
+                active = registry.active
+                health_info = {
+                    "status": "ok",
+                    "embedding_model": cfg.get("embedding.model", ""),
+                    "reranker_model": cfg.get("search.reranker_model", ""),
+                    "active_provider": active.name if active else None,
+                }
+            except Exception:
+                health_info = {"status": "ok"}
+
+            return {
+                "success": True,
+                "overview": {
+                    "total_chunks": total_chunks,
+                    "total_collections": len(collections),
+                    "topics": {t: len(names) for t, names in topic_map.items()},
+                    "top_tags": [t for t, _ in top_tags],
+                },
+                "health": health_info,
+                "collections": coll_details,
+                "cross_source_entities": cross_source,
+                "usage": usage,
+                "workflows": [
+                    {
+                        "name": "Research a topic",
+                        "steps": [
+                            "search(query) — compact results show scores, titles, summaries",
+                            "Scan results, pick promising hits by score and relevance",
+                            "get_context(chunk_id) — fetch full text for selected chunks",
+                            "find_related(chunk_id) — discover what other sources say about the same entities",
+                        ],
+                    },
+                    {
+                        "name": "Browse a book's structure",
+                        "steps": [
+                            "intro() — see what's indexed (or check collection IDs in the intro response)",
+                            "get_toc(collection) — see chapters/sections with chunk counts",
+                            "get_context(chunk_id) — read a specific section",
+                        ],
+                    },
+                    {
+                        "name": "Cross-source discovery",
+                        "steps": [
+                            "Check cross_source_entities above for entities bridging multiple books",
+                            "find_related(entity='entity name') — find all chunks mentioning an entity",
+                            "search_deep(query) — multi-hop search across sources for complex questions",
+                            "entity_index() — full entity map with variants and types",
+                        ],
+                    },
+                ],
+                "tips": [
+                    "Search results are compact by default — scan scores and summaries first, then get_context for full text",
+                    "Use get_toc to understand a book's structure before diving into specific sections",
+                    "find_related discovers cross-source connections that pure text search would miss",
+                    "After context compaction, call reset_session so previously-seen chunks surface at full relevance again",
+                    "Chunks auto-expire from deprioritization after 30 min — reset_session is for immediate refresh",
+                ],
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
 
     # ── search ───────────────────────────────────────────────────────
 
@@ -173,7 +365,7 @@ def _register_tools(mcp: FastMCP) -> None:
     def search(
         query: Annotated[str, Field(description="Natural language search query. Be specific for best results.")],
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
-        topic: Annotated[str | None, Field(default=None, description="Filter by topic (e.g. '3d', 'ai', 'code'). Use list_collections to see available topics.")] = None,
+        topic: Annotated[str | None, Field(default=None, description="Filter by topic (e.g. '3d', 'ai', 'code'). Use intro to see available topics.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic (e.g. 'blender', 'houdini').")] = None,
         compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only (title, summary, score, token_count, location) without full text. Set false to include full chunk text inline.")] = True,
         expand: Annotated[bool, Field(default=False, description="If true, return parent-expanded context (surrounding chunks) for each result. Only applies when compact=false.")] = False,
@@ -194,8 +386,8 @@ def _register_tools(mcp: FastMCP) -> None:
 
         TIPS: Start with compact results (default). Check scores and summaries
         to identify relevant hits, then call get_context with chunk_id to read
-        the full text of promising results. Use list_collections to discover
-        available topics/subtopics for filtering.
+        the full text of promising results. Use intro to discover available
+        topics/subtopics for filtering.
         """
         try:
             engine = get_search_engine()
@@ -596,11 +788,37 @@ def _register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    # ── reset_session ───────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def reset_session() -> dict:
+        """Reset the session's fetch history so all chunks are full-score again.
+
+        WHEN TO USE: After you've compacted your context and no longer have
+        previous search results in memory. This clears the deprioritization
+        of previously-fetched chunks so they can surface at full relevance
+        again. Also useful at the start of a new research direction within
+        the same session.
+
+        NOTE: Chunks also automatically become full-score again after 30
+        minutes (configurable TTL), so this is only needed for immediate
+        reset.
+        """
+        try:
+            db = get_database()
+            db.reset_session_fetched(_default_session_id)
+            with _session_lock:
+                if _default_session_id in _sessions:
+                    _sessions[_default_session_id]["last_shown_ids"] = []
+            return {"success": True, "message": "Session fetch history cleared. All chunks are full-score eligible."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
     # ── get_toc ──────────────────────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def get_toc(
-        collection: Annotated[str, Field(description="Collection ID. Use list_collections to find IDs.")],
+        collection: Annotated[str, Field(description="Collection ID (from intro or search results).")],
     ) -> dict:
         """Get the table of contents for a collection.
 
@@ -625,47 +843,11 @@ def _register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ── list_collections ─────────────────────────────────────────────
-
-    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def list_collections() -> dict:
-        """List all indexed collections in the knowledge base.
-
-        WHEN TO USE: Before searching, to discover what content is available
-        and what topic/subtopic filters you can use. Also useful to check
-        if specific content has already been ingested.
-
-        RETURNS: Dict with total_chunks count and a list of collections.
-        Each collection shows its display name, topic, subtopic, episode
-        count, and episode list.
-        """
-        try:
-            store = get_store()
-            collections = store.list_collections()
-            total = store.chunk_count()
-            return {
-                "success": True,
-                "total_chunks": total,
-                "collections": [
-                    {
-                        "collection": c["collection"],
-                        "collection_display": c["collection_display"],
-                        "topic": c["topic"],
-                        "subtopic": c["subtopic"],
-                        "episode_count": c["episode_count"],
-                        "episodes": c["episodes"],
-                    }
-                    for c in collections
-                ],
-            }
-        except Exception as e:
-            return {"success": False, "error": str(e), "total_chunks": 0, "collections": []}
-
     # ── delete_collection ────────────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
     def delete_collection(
-        collection: Annotated[str, Field(description="Collection ID to delete. Use list_collections to find IDs.")],
+        collection: Annotated[str, Field(description="Collection ID to delete (from intro or search results).")],
     ) -> dict:
         """Permanently delete a collection and all its chunks.
 
@@ -681,30 +863,157 @@ def _register_tools(mcp: FastMCP) -> None:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
-    # ── health ───────────────────────────────────────────────────────
+    # ── find_related ──────────────────────────────────────────────────
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
-    def health() -> dict:
-        """Check Lore server status and knowledge base stats.
+    def find_related(
+        chunk_id: Annotated[str | None, Field(default=None, description="Find chunks related to this chunk via shared entities.")] = None,
+        entity: Annotated[str | None, Field(default=None, description="Find chunks mentioning this entity (fuzzy-matched).")] = None,
+        collection: Annotated[str | None, Field(default=None, description="Limit results to this collection.")] = None,
+        n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Number of results.")] = 10,
+    ) -> dict:
+        """Find related chunks through shared entities across collections.
 
-        WHEN TO USE: To verify the server is running and check how much
-        content is indexed before performing operations. Also useful to
-        see which models are loaded and what LLM provider is active.
+        Uses the fuzzy entity index to resolve name variants (e.g. "Sun Tzu"
+        matches "Sun Tzǔu", "Sunzi", etc). Finds cross-source connections
+        that pure text search would miss.
+
+        WHEN TO USE: After finding something interesting, discover what other
+        sources say about the same people, concepts, or organizations.
+        Provide either a chunk_id (to find chunks sharing its entities) or
+        an entity name (to find all chunks mentioning that entity).
+
+        RETURNS: Related chunks with the shared entities that connect them.
         """
+        from ..core.entities import get_entity_index
+
         try:
-            cfg = get_config()
+            idx = get_entity_index()
             store = get_store()
-            registry = get_registry()
-            active = registry.active
+
+            target_entities: list[str] = []
+
+            if chunk_id:
+                chunk = store.get_chunk_by_id(chunk_id)
+                if not chunk:
+                    return {"success": False, "error": f"Chunk not found: {chunk_id}"}
+                ents_raw = chunk.get("entities", "")
+                if ents_raw:
+                    try:
+                        ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
+                        target_entities = [e.get("name", "") for e in ents if isinstance(e, dict) and e.get("name")]
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                if not target_entities:
+                    return {"success": True, "chunk_id": chunk_id, "message": "No entities found on this chunk", "results": []}
+
+            elif entity:
+                target_entities = [entity]
+            else:
+                return {"success": False, "error": "Provide chunk_id or entity name"}
+
+            canonical_entities = set()
+            for ent in target_entities:
+                cluster = idx.resolve(ent)
+                if cluster:
+                    canonical_entities.add(cluster.canonical)
+
+            if not canonical_entities:
+                canonical_entities = {e.lower() for e in target_entities}
+
+            all_variant_names = set()
+            for canonical in canonical_entities:
+                for cluster in idx.clusters:
+                    if cluster.canonical == canonical:
+                        all_variant_names.update(v.lower() for v in cluster.variants)
+
+            if not all_variant_names:
+                all_variant_names = {e.lower() for e in target_entities}
+
+            collections = store.list_collections()
+            related_chunks = []
+
+            for coll in collections:
+                if collection and coll["collection"] != collection:
+                    continue
+                try:
+                    chunks = store.get_all_chunks(coll["collection"])
+                except Exception:
+                    continue
+
+                for c in chunks:
+                    if chunk_id and c.get("id") == chunk_id:
+                        continue
+                    ents_raw = c.get("entities", "")
+                    if not ents_raw:
+                        continue
+                    try:
+                        ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
+                        chunk_ent_names = [e.get("name", "") for e in ents if isinstance(e, dict) and e.get("name")]
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+
+                    shared = set()
+                    for chunk_ent in chunk_ent_names:
+                        cluster = idx.resolve(chunk_ent)
+                        if cluster and cluster.canonical in canonical_entities:
+                            shared.add(cluster.canonical)
+
+                    if shared:
+                        related_chunks.append({
+                            "chunk_id": c.get("id", ""),
+                            "collection": c.get("collection", ""),
+                            "episode_title": c.get("episode_title", ""),
+                            "shared_entities": sorted(shared),
+                            "match_count": len(shared),
+                        })
+
+            related_chunks.sort(key=lambda x: x["match_count"], reverse=True)
+            total_found = len(related_chunks)
+            related_chunks = related_chunks[:n_results]
 
             return {
                 "success": True,
-                "status": "ok",
-                "version": "0.1.0",
-                "embedding_model": cfg.get("embedding.model", ""),
-                "reranker_model": cfg.get("search.reranker_model", ""),
-                "total_chunks": store.chunk_count(),
-                "active_provider": active.name if active else None,
+                "query_entities": sorted(canonical_entities),
+                "total_related": total_found,
+                "returned": len(related_chunks),
+                "results": related_chunks,
             }
         except Exception as e:
-            return {"success": False, "error": str(e), "status": "error"}
+            return {"success": False, "error": str(e)}
+
+    # ── entity_index ────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def entity_index(
+        rebuild: Annotated[bool, Field(default=False, description="Force rebuild the entity index from all chunks.")] = False,
+    ) -> dict:
+        """View or rebuild the fuzzy entity index.
+
+        Shows all canonical entities with their variants, types, and which
+        collections they appear in. Identifies cross-source entities that
+        bridge multiple books/documents.
+
+        WHEN TO USE: To understand what entities exist across your knowledge
+        base, find cross-source connections, or rebuild after new ingestion.
+        """
+        from ..core.entities import get_entity_index
+
+        try:
+            idx = get_entity_index(rebuild=rebuild)
+            stats = idx.stats()
+            cross = idx.get_cross_source_entities()
+            stats["cross_source_details"] = [
+                {
+                    "canonical": c.canonical,
+                    "type": c.entity_type,
+                    "sources": sorted(c.sources),
+                    "variants": sorted(c.variants),
+                    "count": c.count,
+                }
+                for c in sorted(cross, key=lambda x: x.count, reverse=True)[:20]
+            ]
+            return {"success": True, **stats}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
