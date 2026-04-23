@@ -27,11 +27,12 @@ dependencies = [
 all = [
     "lore[gpu,transcribe,local,enrich]",
 ]
-# Enrichment (keywords, NER, summaries)
+# Enrichment (keywords, NER, summaries, entity merging)
 enrich = [
     "keybert>=0.8",
     "spacy>=3.7",
     "scikit-learn>=1.3",
+    "rapidfuzz>=3.0",
 ]
 # GPU-accelerated ONNX inference
 gpu = [

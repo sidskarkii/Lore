@@ -197,7 +197,10 @@ class Store:
         existing_hashes: set[str] = set()
         try:
             collection = _esc(meta["collection"])
-            rows = tbl.search().where(f"collection = '{collection}'").select(["content_hash"]).limit(500_000).to_list()
+            ep_num = int(meta["episode_num"])
+            rows = tbl.search().where(
+                f"collection = '{collection}' AND episode_num != {ep_num}"
+            ).select(["content_hash"]).limit(500_000).to_list()
             existing_hashes = {r["content_hash"] for r in rows if r.get("content_hash")}
         except Exception:
             pass
@@ -347,6 +350,21 @@ class Store:
             return results[0] if results else None
         except Exception:
             return None
+
+    def get_all_chunks(self, collection: str) -> list[dict]:
+        """Return all chunks for a collection (metadata only, no vectors)."""
+        tbl = self._get_or_create_table()
+        try:
+            rows = (
+                tbl.search()
+                .where(f"collection = '{_esc(collection)}'")
+                .select(["id", "entities", "keywords", "concept_tags", "collection", "episode_title", "source_type"])
+                .limit(100_000)
+                .to_list()
+            )
+            return rows
+        except Exception:
+            return []
 
     def get_toc(self, collection: str) -> list[dict]:
         """Return table-of-contents structure for a collection: ordered sections with chunk counts and token estimates."""

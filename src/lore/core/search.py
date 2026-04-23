@@ -102,7 +102,7 @@ def _parse_sub_queries(text: str, max_queries: int) -> list[str]:
 
 
 def _extract_query_entities(query: str) -> set[str]:
-    """Extract entity names from the search query using spaCy."""
+    """Extract entity names from the search query using spaCy, expanded via entity index."""
     try:
         from .enrich import _get_nlp
         nlp = _get_nlp()
@@ -113,20 +113,48 @@ def _extract_query_entities(query: str) -> set[str]:
         for token in doc:
             if token.pos_ == "PROPN":
                 entities.add(token.text.lower())
-        return entities
+
+        try:
+            from .entities import get_entity_index
+            idx = get_entity_index()
+            expanded = set()
+            for ent in entities:
+                cluster = idx.resolve(ent)
+                if cluster:
+                    expanded.update(v.lower() for v in cluster.variants)
+                else:
+                    expanded.add(ent)
+            return expanded
+        except Exception:
+            return entities
     except Exception:
         return set()
 
 
 def _entity_rank(candidates: list[dict], query_entities: set[str]) -> list[str]:
-    """Rank candidates by entity overlap with query entities."""
+    """Rank candidates by entity overlap with query entities (entity-index-aware)."""
+    try:
+        from .entities import get_entity_index
+        idx = get_entity_index()
+    except Exception:
+        idx = None
+
     scored = []
     for c in candidates:
         try:
             ents_raw = c.get("entities", "")
             if ents_raw:
                 ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
-                chunk_entities = {e.get("name", "").lower() for e in ents if isinstance(e, dict)}
+                chunk_entities = set()
+                for e in ents:
+                    if not isinstance(e, dict):
+                        continue
+                    name = e.get("name", "").lower()
+                    chunk_entities.add(name)
+                    if idx:
+                        cluster = idx.resolve(name)
+                        if cluster:
+                            chunk_entities.update(v.lower() for v in cluster.variants)
             else:
                 chunk_entities = set()
         except (json.JSONDecodeError, TypeError):
@@ -254,11 +282,12 @@ class SearchEngine:
         # 6. Rating + importance boost
         results = _apply_rating_boost(results)
 
-        # 7. Session-aware deprioritization
+        # 7. Session-aware deprioritization (with TTL)
         if session_id:
             try:
                 from .database import get_database
-                fetched_ids = get_database().get_session_fetched_ids(session_id)
+                ttl = cfg.get("search.session_ttl_minutes", 30)
+                fetched_ids = get_database().get_session_fetched_ids(session_id, ttl_minutes=ttl)
             except Exception:
                 fetched_ids = set()
 
