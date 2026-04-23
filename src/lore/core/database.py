@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -372,13 +372,25 @@ class Database:
         ).fetchall()
         return {row["chunk_id"]: dict(row) for row in rows}
 
-    def get_session_fetched_ids(self, session_id: str) -> set[str]:
-        """Get all chunk IDs fetched via get_context in a session."""
-        rows = self._conn.execute(
-            "SELECT chunk_ids_fetched FROM interactions "
-            "WHERE session_id = ? AND action = 'get_context'",
-            (session_id,),
-        ).fetchall()
+    def get_session_fetched_ids(self, session_id: str, ttl_minutes: int = 0) -> set[str]:
+        """Get chunk IDs fetched via get_context in a session.
+
+        If ttl_minutes > 0, only return IDs fetched within the last N minutes
+        (expired fetches become full-score eligible again).
+        """
+        if ttl_minutes > 0:
+            cutoff = (datetime.now(timezone.utc) - timedelta(minutes=ttl_minutes)).isoformat()
+            rows = self._conn.execute(
+                "SELECT chunk_ids_fetched FROM interactions "
+                "WHERE session_id = ? AND action = 'get_context' AND timestamp > ?",
+                (session_id, cutoff),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT chunk_ids_fetched FROM interactions "
+                "WHERE session_id = ? AND action = 'get_context'",
+                (session_id,),
+            ).fetchall()
         result = set()
         for row in rows:
             if row["chunk_ids_fetched"]:
@@ -388,11 +400,39 @@ class Database:
                     pass
         return result
 
+    def reset_session_fetched(self, session_id: str):
+        """Clear fetch history for a session (e.g. after agent context compaction)."""
+        self._conn.execute(
+            "DELETE FROM interactions WHERE session_id = ? AND action = 'get_context'",
+            (session_id,),
+        )
+        self._conn.commit()
+
     def get_interaction_stats(self) -> dict:
         total = self._conn.execute("SELECT COUNT(*) FROM interactions").fetchone()[0]
         sessions = self._conn.execute("SELECT COUNT(DISTINCT session_id) FROM interactions").fetchone()[0]
         rated_chunks = self._conn.execute("SELECT COUNT(*) FROM chunk_ratings").fetchone()[0]
         return {"total_interactions": total, "unique_sessions": sessions, "rated_chunks": rated_chunks}
+
+    def get_top_queries(self, limit: int = 10) -> list[dict]:
+        """Return most frequent search queries."""
+        rows = self._conn.execute(
+            "SELECT query, COUNT(*) as count FROM interactions "
+            "WHERE action IN ('search', 'search_deep') AND query IS NOT NULL "
+            "GROUP BY query ORDER BY count DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [{"query": r["query"], "count": r["count"]} for r in rows]
+
+    def get_top_chunks(self, limit: int = 10) -> list[dict]:
+        """Return highest-rated chunks by net score (fetches/upvotes minus ignores/downvotes)."""
+        rows = self._conn.execute(
+            "SELECT chunk_id, fetches, ignores, explicit_up, explicit_down "
+            "FROM chunk_ratings "
+            "ORDER BY (fetches + explicit_up * 3) - (ignores + explicit_down * 3) DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
 
 
 # Module-level singleton
