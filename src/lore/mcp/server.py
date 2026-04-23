@@ -56,10 +56,8 @@ _default_session_id = uuid.uuid4().hex[:12]
 
 def _build_instructions() -> str:
     """Build dynamic MCP instructions with current store stats."""
-    base = (
-        "Lore is a local-first RAG knowledge base. It indexes videos, documents, "
-        "code, and web pages into searchable chunks with timestamp-level precision."
-    )
+    # Dynamic state
+    state = ""
     try:
         store = get_store()
         collections = store.list_collections()
@@ -67,23 +65,54 @@ def _build_instructions() -> str:
         if collections:
             topics = sorted({c["topic"] for c in collections if c["topic"]})
             names = [c["collection_display"] for c in collections]
-            base += (
-                f" Currently indexed: {total} chunks across {len(collections)} collections "
-                f"({', '.join(names[:5])}{'...' if len(names) > 5 else ''})."
-                f" Topics: {', '.join(topics)}." if topics else ""
+            state = (
+                f"Currently indexed: {total} chunks across {len(collections)} collections "
+                f"({', '.join(names[:5])}{'...' if len(names) > 5 else ''}). "
             )
+            if topics:
+                state += f"Topics: {', '.join(topics)}. "
+
+            try:
+                from ..core.entities import get_entity_index
+                idx = get_entity_index()
+                cross = idx.get_cross_source_entities()
+                if cross:
+                    state += f"{len(cross)} entities bridge multiple sources — use find_related to explore. "
+            except Exception:
+                pass
+
+            try:
+                registry = get_registry()
+                if not registry.active:
+                    state += "No LLM provider configured — search_deep unavailable. "
+            except Exception:
+                pass
         else:
-            base += " No content indexed yet — use 'ingest' to add content."
+            state = "No content indexed yet — use ingest to add videos, documents, or web pages. "
     except Exception:
         pass
 
-    base += (
-        " Call 'intro' for full orientation — collections, summaries, health, workflows. "
-        "Use 'search' for most queries (compact by default). Use 'get_context' to fetch "
-        "full text. Use 'search_deep' for complex multi-topic questions. Use 'find_related' "
-        "for cross-source entity connections."
+    return (
+        "Lore is a local-first RAG knowledge base. Content is organized as collections "
+        "(books, videos, docs) split into searchable chunks with metadata, entities, and "
+        f"concept tags. {state}"
+        "\n\n"
+        "Default retrieval loop:\n"
+        "1. search(query) — returns compact results (~50 tokens each): scores, titles, summaries. Keep queries short and specific.\n"
+        "2. Scan results. Pick promising hits by score and summary.\n"
+        "3. get_context(chunk_id) — fetch full text (~500-1000 tokens) for selected chunks. Paginate with page_tokens.\n"
+        "4. find_related(chunk_id) — discover what other sources say about the same entities.\n"
+        "\n"
+        "Other tools:\n"
+        "- intro — call for full orientation: collection summaries, topics, health, workflows\n"
+        "- search_deep — multi-hop decomposition for complex/comparative questions (slower, uses LLM)\n"
+        "- get_toc(collection) — browse a collection's structure by section\n"
+        "- entity_index — view all known entities and cross-source connections\n"
+        "- reset_session — call after context compaction so fetched chunks regain full relevance\n"
+        "\n"
+        "Avoid: long multi-sentence queries, compact=false before scanning results, "
+        "fetching many chunks at once, search_deep for simple lookups."
     )
-    return base
 
 
 def create_mcp_server() -> FastMCP:
@@ -370,24 +399,15 @@ def _register_tools(mcp: FastMCP) -> None:
         compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only (title, summary, score, token_count, location) without full text. Set false to include full chunk text inline.")] = True,
         expand: Annotated[bool, Field(default=False, description="If true, return parent-expanded context (surrounding chunks) for each result. Only applies when compact=false.")] = False,
     ) -> dict:
-        """Search the Lore knowledge base using hybrid retrieval.
-
-        Combines vector similarity search with BM25 keyword matching and
-        cross-encoder reranking for high-quality results.
+        """Step 1: Search the knowledge base. Returns compact results (~50 tokens each).
 
         WHEN TO USE: Primary tool for finding information. Use for factual
-        queries, how-to questions, or locating specific content. For complex
-        questions spanning multiple topics, use search_deep instead.
+        queries, how-to questions, or locating specific content. Keep queries
+        short and specific. For complex multi-topic questions, use search_deep.
 
-        RETURNS: By default returns compact results (no full text) with score,
-        token_count, title, summary, and location metadata. This lets you scan
-        results and decide which to fetch in full via get_context. Set
-        compact=false to include full chunk text inline (costs more context).
-
-        TIPS: Start with compact results (default). Check scores and summaries
-        to identify relevant hits, then call get_context with chunk_id to read
-        the full text of promising results. Use intro to discover available
-        topics/subtopics for filtering.
+        RETURNS: Compact results by default — score, title, summary, keywords,
+        location. Scan these first, then call get_context for full text of
+        promising hits. Set compact=false only when you need inline text.
         """
         try:
             engine = get_search_engine()
@@ -503,22 +523,15 @@ def _register_tools(mcp: FastMCP) -> None:
         page: Annotated[int, Field(default=1, ge=1, description="Page number (1-indexed). Use with page_tokens to paginate through content.")] = 1,
         page_tokens: Annotated[int, Field(default=1500, ge=0, description="Max tokens per page. 0 = no pagination (return all). Default 1500. Agent controls how much to read per page.")] = 1500,
     ) -> dict:
-        """Read more content around a search result or a specific section.
+        """Step 3: Fetch full text (~500-1000 tokens) around a search result.
 
-        WHEN TO USE: After a search returns a promising result and you need
-        more context. Pass the chunk_id from the search result, or specify
-        a collection + episode + time range directly.
+        WHEN TO USE: After scanning compact search results, call this with
+        the chunk_id of promising hits. Paginate with page_tokens to control
+        how much text per response.
 
-        PARAMETERS:
-        - chunk_id: Pass this from a search result's chunk_id field. The tool
-          will look up the chunk's location and expand around it.
-        - OR provide collection + episode_num + start_sec to target a specific
-          time range directly.
-        - direction: 'around' expands equally in both directions. 'before'
-          fetches content leading up to the point. 'after' fetches what follows.
-        - amount_sec: Total seconds of context to fetch (default 300 = 5 minutes).
-        - page_tokens: Set to control how many tokens per page (e.g. 500, 1000).
-          Use page param to navigate. Response includes total_pages.
+        Pass chunk_id from search results. Or specify collection + episode_num
+        + start_sec directly. Use direction ('before'/'after'/'around') and
+        page/page_tokens to navigate through content.
         """
         try:
             store = get_store()
@@ -872,18 +885,14 @@ def _register_tools(mcp: FastMCP) -> None:
         collection: Annotated[str | None, Field(default=None, description="Limit results to this collection.")] = None,
         n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Number of results.")] = 10,
     ) -> dict:
-        """Find related chunks through shared entities across collections.
+        """Step 4: Discover cross-source connections via shared entities.
 
-        Uses the fuzzy entity index to resolve name variants (e.g. "Sun Tzu"
-        matches "Sun Tzǔu", "Sunzi", etc). Finds cross-source connections
-        that pure text search would miss.
-
-        WHEN TO USE: After finding something interesting, discover what other
+        WHEN TO USE: After finding a useful chunk, discover what other
         sources say about the same people, concepts, or organizations.
-        Provide either a chunk_id (to find chunks sharing its entities) or
-        an entity name (to find all chunks mentioning that entity).
+        Resolves name variants automatically (fuzzy matching).
 
-        RETURNS: Related chunks with the shared entities that connect them.
+        Provide chunk_id (finds chunks sharing its entities) or entity
+        name (finds all chunks mentioning that entity across collections).
         """
         from ..core.entities import get_entity_index
 
