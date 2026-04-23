@@ -20,10 +20,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import threading
+
 from .chunk import chunk_segments, chunk_sections
 from .config import get_config
 from .store import Store, get_store
 from .transcribe import Transcriber
+
+_ingest_lock = threading.Lock()
+_ingest_in_progress: set[str] = set()
 
 
 @dataclass
@@ -76,11 +81,21 @@ class Ingester:
     # ── Archive ──────────────────────────────────────────────────────
 
     def _save_archive(self, collection: str, doc, chunks: list[dict], meta: dict, section_summaries=None, book_summary=None):
-        """Save extracted text and enriched chunks to source-segregated archive."""
-        archive_path = self._cfg.archive_dir / collection
-        archive_path.mkdir(parents=True, exist_ok=True)
+        """Save extracted text and enriched chunks to source-segregated archive.
 
-        (archive_path / "meta.json").write_text(json.dumps({
+        Writes to a temp directory first, then atomically renames to the
+        final path to prevent partial archive state on failure.
+        """
+        archive_dir = self._cfg.archive_dir
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        final_path = archive_dir / collection
+        tmp_path = archive_dir / f".{collection}.tmp"
+
+        if tmp_path.exists():
+            shutil.rmtree(tmp_path)
+        tmp_path.mkdir(parents=True)
+
+        (tmp_path / "meta.json").write_text(json.dumps({
             **meta,
             "archived_at": __import__("datetime").datetime.now().isoformat(),
             "doc_metadata": doc.metadata,
@@ -95,20 +110,33 @@ class Ingester:
                 sections_md.append(f"## {heading}\n\n{s['text']}")
             else:
                 sections_md.append(s["text"])
-        (archive_path / "extracted.md").write_text("\n\n---\n\n".join(sections_md))
+        (tmp_path / "extracted.md").write_text("\n\n---\n\n".join(sections_md))
 
         serializable_chunks = []
         for c in chunks:
             sc = {k: v for k, v in c.items() if k != "vector" and not k.startswith("_")}
             serializable_chunks.append(sc)
-        (archive_path / "chunks.json").write_text(json.dumps(serializable_chunks, indent=2, default=str))
+        (tmp_path / "chunks.json").write_text(json.dumps(serializable_chunks, indent=2, default=str))
 
         if section_summaries:
-            (archive_path / "section_summaries.json").write_text(json.dumps(section_summaries, indent=2, default=str))
+            (tmp_path / "section_summaries.json").write_text(json.dumps(section_summaries, indent=2, default=str))
         if book_summary:
-            (archive_path / "book_summary.json").write_text(json.dumps(book_summary, indent=2, default=str))
+            (tmp_path / "book_summary.json").write_text(json.dumps(book_summary, indent=2, default=str))
 
-        print(f"  [archive] Saved to {archive_path}")
+        backup_path = archive_dir / f".{collection}.bak"
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
+        if final_path.exists():
+            final_path.rename(backup_path)
+        try:
+            tmp_path.rename(final_path)
+        except OSError:
+            if backup_path.exists():
+                backup_path.rename(final_path)
+            raise
+        if backup_path.exists():
+            shutil.rmtree(backup_path)
+        print(f"  [archive] Saved to {final_path}")
 
     # ── Video/Audio folder ────────────────────────────────────────────
 
@@ -475,16 +503,32 @@ class Ingester:
         on_progress: ProgressCallback = None,
     ) -> int:
         """Shared pipeline for file and URL ingestion: chunk -> enrich -> store."""
-        from .enrich import enrich_programmatic, enrich_chunks_stage2, enrich_section_stage3, enrich_book_stage4
-        from ..providers.registry import get_registry
-
         collection = _sanitize(name)
-        existing = [c for c in self.store.list_collections() if c["collection"] == collection]
-        if existing:
-            print(f"  Collection '{name}' already exists, skipping.")
-            return 0
+        with _ingest_lock:
+            existing = [c for c in self.store.list_collections() if c["collection"] == collection]
+            if existing or collection in _ingest_in_progress:
+                print(f"  Collection '{name}' already exists or in progress, skipping.")
+                return 0
+            _ingest_in_progress.add(collection)
 
         item_name = Path(source_path).name if not source_path.startswith("http") else source_path
+
+        try:
+            return self._run_ingest_pipeline(
+                doc=doc, collection=collection, name=name, topic=topic, subtopic=subtopic,
+                source_path=source_path, url_override=url_override, enrich=enrich,
+                on_progress=on_progress, item_name=item_name,
+            )
+        finally:
+            with _ingest_lock:
+                _ingest_in_progress.discard(collection)
+
+    def _run_ingest_pipeline(
+        self, doc, collection, name, topic, subtopic, source_path,
+        url_override, enrich, on_progress, item_name,
+    ) -> int:
+        from .enrich import enrich_programmatic, enrich_chunks_stage2, enrich_section_stage3, enrich_book_stage4
+        from ..providers.registry import get_registry
 
         if on_progress:
             on_progress(IngestionProgress(

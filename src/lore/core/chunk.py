@@ -148,10 +148,17 @@ def chunk_sections(
     buf_heading = ""
     buf_page = 0
     buf_chapter = ""
+    buf_largest_len = 0
     for block, heading, page_num, chapter in prepared:
         if buf_text:
             if len(buf_text.split()) < merge_threshold:
                 buf_text = f"{buf_text}\n{block}"
+                if len(block) > buf_largest_len:
+                    buf_largest_len = len(block)
+                    if heading:
+                        buf_heading = heading
+                    buf_page = page_num
+                    buf_chapter = chapter
                 continue
             else:
                 merged.append((buf_text, buf_heading, buf_page, buf_chapter))
@@ -159,11 +166,13 @@ def chunk_sections(
                 buf_heading = heading
                 buf_page = page_num
                 buf_chapter = chapter
+                buf_largest_len = len(block)
         else:
             buf_text = block
             buf_heading = heading
             buf_page = page_num
             buf_chapter = chapter
+            buf_largest_len = len(block)
     if buf_text:
         merged.append((buf_text, buf_heading, buf_page, buf_chapter))
 
