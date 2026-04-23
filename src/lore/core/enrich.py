@@ -86,20 +86,45 @@ def _extract_json(response: str) -> list[dict]:
         raise ValueError("Empty response")
 
     text = response.strip()
-    if text.startswith("```"):
-        text = text.split("```")[1]
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
 
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts[1::2]:
+            candidate = part.strip()
+            if candidate.startswith("json"):
+                candidate = candidate[4:].strip()
+            if candidate and (candidate[0] in "[{"):
+                text = candidate
+                break
+
+    # Strip control chars
     text = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', text)
+
+    # Fix trailing commas before ] or } (common LLM mistake)
+    text = re.sub(r',\s*([}\]])', r'\1', text)
+
+    # Fix single-quoted JSON keys/values → double-quoted
+    # Only replace quotes that look like JSON delimiters, not apostrophes in text
+    if "'" in text:
+        text = re.sub(r"(?<=[\[{,:])\s*'|'\s*(?=[:,\]}])", '"', text)
 
     try:
         results = json.loads(text)
     except json.JSONDecodeError:
-        match = re.search(r'\[.*\]', text, re.DOTALL)
-        if match:
-            results = json.loads(match.group())
+        candidates = []
+        for pattern in [r'\[.*\]', r'\{.*\}']:
+            match = re.search(pattern, text, re.DOTALL)
+            if match:
+                try:
+                    parsed = json.loads(re.sub(r',\s*([}\]])', r'\1', match.group()))
+                    candidates.append((len(match.group()), parsed))
+                except json.JSONDecodeError:
+                    pass
+
+        if candidates:
+            candidates.sort(key=lambda x: -x[0])
+            results = candidates[0][1]
         else:
             raise
 
@@ -523,6 +548,11 @@ def enrich_section_stage3(
                 result = _extract_json(response)
                 if isinstance(result, list):
                     result = result[0]
+                if result.get("running_summary"):
+                    running_summary = result["running_summary"]
+                for title_entry in result.get("chunk_titles", []):
+                    if isinstance(title_entry, dict) and title_entry not in chunk_titles:
+                        chunk_titles.append(title_entry)
                 for concept in result.get("key_concepts", []):
                     if concept not in all_key_concepts:
                         all_key_concepts.append(concept)
