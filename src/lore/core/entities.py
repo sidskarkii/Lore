@@ -21,19 +21,52 @@ from .config import get_config
 _STOP_ENTITIES = {
     "king", "majesty", "state", "palace", "army", "emperor",
     "lord", "prince", "minister", "general", "master", "sir",
-    "chapter", "section", "part", "book", "page", "volume",
     "strong", "ford", "moon", "earth", "sun", "god",
 }
 
-_CHAPTER_RE = re.compile(
-    r"^(?:I{1,4}V?|VI{0,4}|IX|XI{0,3}|XI?V|XV?I{0,3})"
-    r"(?:\s|$|\.|:)|"
-    r"^\d+[\.\):]?\s|"
-    r"^[A-Z]\.\s*$",
+_STRUCTURAL_RE = re.compile(
+    r"^(?:chapter|section|figure|fig\.?|table|appendix|part|volume|page|exhibit)"
+    r"\s+(?:\d[\d.a-z]*|[a-z]|[ivxlc]+)$",
+    re.IGNORECASE,
+)
+
+_ROMAN_ONLY_RE = re.compile(
+    r"^(?:I{1,4}V?|VI{0,4}|IX|XI{0,3}|XI?V|XV?I{0,3})$"
 )
 
 _POSSESSIVE_RE = re.compile(r"['']s$")
 _LEADING_NOISE = re.compile(r"^(?:the|a|an|of|in|on|at|to|for|by|with|from|thereupon|introduction)\s+", re.IGNORECASE)
+
+_KNOWN_GPES = {
+    "france", "london", "paris", "china", "rome", "spain", "england",
+    "germany", "italy", "russia", "japan", "india", "egypt", "greece",
+    "turkey", "persia", "austria", "prussia", "holland", "brazil",
+    "mexico", "canada", "australia", "ireland", "scotland",
+    "venice", "milan", "naples", "amsterdam",
+    "berlin", "vienna", "moscow", "beijing", "tokyo",
+    "new york", "los angeles", "chicago", "boston", "philadelphia",
+    "athens", "carthage", "constantinople", "babylon", "jerusalem",
+    "africa", "europe", "asia", "america", "arabia",
+}
+
+_COARSE_TYPE = {
+    "PERSON": "PERSON",
+    "ORG": "ORG",
+    "GPE": "PLACE", "LOC": "PLACE", "FAC": "PLACE",
+    "WORK_OF_ART": "WORK", "LAW": "WORK",
+    "EVENT": "EVENT",
+    "PRODUCT": "PRODUCT", "TECH": "PRODUCT",
+    "CONCEPT": "CONCEPT",
+    "METRIC": "METRIC",
+    "NORP": "GROUP",
+}
+
+
+def _correct_type(name: str, etype: str) -> str:
+    """Conservative type correction via gazetteer."""
+    if name.lower() in _KNOWN_GPES and etype in ("PERSON", "ORG"):
+        return "GPE"
+    return etype
 
 
 def _normalize(name: str) -> str:
@@ -53,13 +86,41 @@ def _should_filter(name: str, normalized: str) -> bool:
         return True
     if len(normalized) <= 3 and normalized.isupper():
         return True
-    if _CHAPTER_RE.match(name.strip()):
+    if _STRUCTURAL_RE.match(normalized):
+        return True
+    if _ROMAN_ONLY_RE.match(normalized):
         return True
     if normalized.lower() in _STOP_ENTITIES:
         return True
     if all(c in ".-()[]0123456789 " for c in normalized):
         return True
     if normalized.count(" ") > 6:
+        return True
+    return False
+
+
+def _merge_threshold(name: str, base: float = 85.0) -> float:
+    """Adaptive merge threshold based on name length and token count."""
+    token_count = len(name.split())
+    if token_count == 1:
+        if len(name) <= 5:
+            return 100.0
+        elif len(name) <= 8:
+            return 95.0
+        else:
+            return 93.0
+    if token_count >= 2:
+        return 90.0
+    return base
+
+
+def _coarse_type_compatible(type_a: str, type_b: str) -> bool:
+    """Check if two entity types are compatible for merging."""
+    ca = _COARSE_TYPE.get(type_a, type_a)
+    cb = _COARSE_TYPE.get(type_b, type_b)
+    if ca == cb:
+        return True
+    if "UNKNOWN" in (ca, cb):
         return True
     return False
 
@@ -112,18 +173,25 @@ class EntityIndex:
         self._cfg = get_config()
         self._index_path = self._cfg.data_dir / "entity_index.json"
 
-    def _find_best_cluster(self, normalized: str) -> tuple[int, float]:
-        """Find the best matching cluster for a normalized entity name."""
+    def _find_best_cluster(self, normalized: str, entity_type: str = "") -> tuple[int, float]:
+        """Find the best matching cluster for a normalized entity name (type-aware)."""
         best_idx = -1
         best_score = 0.0
+        incoming_threshold = _merge_threshold(normalized, self.threshold)
         for i, cluster in enumerate(self.clusters):
+            if entity_type and not _coarse_type_compatible(entity_type, cluster.entity_type):
+                continue
+            cluster_threshold = _merge_threshold(cluster.canonical, self.threshold)
+            required = max(incoming_threshold, cluster_threshold)
             score = _jaro_winkler(normalized, cluster.canonical.lower())
-            if score > best_score:
+            if score >= required and score > best_score:
                 best_score = score
                 best_idx = i
             for variant in cluster.variants:
+                variant_threshold = _merge_threshold(variant, self.threshold)
+                vrequired = max(incoming_threshold, variant_threshold)
                 vscore = _jaro_winkler(normalized, variant.lower())
-                if vscore > best_score:
+                if vscore >= vrequired and vscore > best_score:
                     best_score = vscore
                     best_idx = i
         return best_idx, best_score
@@ -215,7 +283,7 @@ class EntityIndex:
         return self
 
     def _cluster_entities(self, raw_entities: list[tuple[str, str, str]]):
-        """Normalize, filter, and cluster raw entities."""
+        """Normalize, filter, type-correct, and cluster raw entities."""
         name_counts: Counter[str] = Counter()
         name_info: dict[str, list[tuple[str, str, str]]] = {}
 
@@ -223,6 +291,7 @@ class EntityIndex:
             normalized = _normalize(raw_name)
             if _should_filter(raw_name, normalized):
                 continue
+            etype = _correct_type(normalized, etype)
             name_counts[normalized] += 1
             name_info.setdefault(normalized, []).append((raw_name, etype, source))
 
@@ -238,12 +307,13 @@ class EntityIndex:
             majority_type = type_counts.most_common(1)[0][0]
             sources = {src for _, _, src in infos}
 
-            best_idx, best_score = self._find_best_cluster(normalized)
+            threshold = _merge_threshold(normalized, self.threshold)
+            best_idx, best_score = self._find_best_cluster(normalized, majority_type)
 
-            if best_score >= self.threshold and best_idx >= 0:
+            if best_score >= threshold and best_idx >= 0:
                 cluster = self.clusters[best_idx]
                 for raw_name, etype, source in infos:
-                    cluster.merge(_normalize(raw_name), etype, source)
+                    cluster.merge(_normalize(raw_name), _correct_type(_normalize(raw_name), etype), source)
                 self._variant_map[normalized] = best_idx
             else:
                 idx = len(self.clusters)
@@ -267,15 +337,16 @@ class EntityIndex:
             for variant in cluster.variants:
                 self._variant_map[variant.lower()] = i
 
-    def resolve(self, name: str) -> EntityCluster | None:
+    def resolve(self, name: str, entity_type: str = "") -> EntityCluster | None:
         """Resolve an entity name to its canonical cluster."""
         normalized = _normalize(name).lower()
         idx = self._variant_map.get(normalized)
         if idx is not None and idx < len(self.clusters):
             return self.clusters[idx]
 
-        best_idx, best_score = self._find_best_cluster(normalized)
-        if best_score >= self.threshold and best_idx >= 0:
+        threshold = _merge_threshold(normalized, self.threshold)
+        best_idx, best_score = self._find_best_cluster(normalized, entity_type)
+        if best_score >= threshold and best_idx >= 0:
             return self.clusters[best_idx]
         return None
 

@@ -20,12 +20,17 @@ dependencies = [
     "sse-starlette>=2.0",
     "mcp[cli]>=1.9",
     "python-dotenv>=1.0",
+    "trafilatura>=1.6",
+    "pdfplumber>=0.10",
+    "pymupdf>=1.24",
+    "ebooklib>=0.18",
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
-# Full install with all features
+# Full install — everything needed for a working system on macOS Apple Silicon
 all = [
-    "lore[gpu,transcribe,local,enrich]",
+    "lore[enrich,transcribe]",
 ]
 # Enrichment (keywords, NER, summaries, entity merging)
 enrich = [
@@ -34,13 +39,13 @@ enrich = [
     "scikit-learn>=1.3",
     "rapidfuzz>=3.0",
 ]
-# GPU-accelerated ONNX inference
-gpu = [
-    "onnxruntime-gpu>=1.18",
-]
-# Whisper transcription (requires torch)
+# Whisper transcription for audio/video
 transcribe = [
     "faster-whisper>=1.0",
+]
+# GPU-accelerated ONNX inference (Linux/Windows CUDA only, not macOS)
+gpu = [
+    "onnxruntime-gpu>=1.18",
 ]
 # Local GGUF inference
 local = [
