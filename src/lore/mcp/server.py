@@ -1,6 +1,6 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (12):
+Tools (13):
     intro             — deep orientation: collections, summaries, health, workflows
     search            — hybrid search (vector + BM25 + reranking)
     search_deep       — multi-hop decomposition for complex queries
@@ -108,6 +108,7 @@ def _build_instructions() -> str:
         "- search_deep — multi-hop decomposition for complex/comparative questions (slower, uses LLM)\n"
         "- get_toc(collection) — browse a collection's structure by section\n"
         "- entity_index — view all known entities and cross-source connections\n"
+        "- entity_graph — co-occurrence graph: NPMI neighbors, topic communities, bridge entities\n"
         "- reset_session — call after context compaction so fetched chunks regain full relevance\n"
         "\n"
         "Avoid: long multi-sentence queries, compact=false before scanning results, "
@@ -1042,6 +1043,58 @@ def _register_tools(mcp: FastMCP) -> None:
                 for c in sorted(cross, key=lambda x: x.count, reverse=True)[:20]
             ]
             return {"success": True, **stats}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── entity_graph ────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def entity_graph(
+        entity: Annotated[str | None, Field(default=None, description="Entity to inspect (fuzzy-matched).")] = None,
+        mode: Annotated[str, Field(default="neighbors", description="Query mode: 'neighbors' (top NPMI connections), 'community' (same topic cluster), 'bridges' (entities connecting communities), 'stats' (graph overview).")] = "neighbors",
+        n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Number of results.")] = 10,
+        rebuild: Annotated[bool, Field(default=False, description="Force rebuild the co-occurrence graph.")] = False,
+    ) -> dict:
+        """Query the entity co-occurrence graph.
+
+        Entities that appear together in chunks are connected by edges
+        weighted with NPMI (statistically surprising associations).
+        Louvain community detection groups entities into topic clusters.
+
+        WHEN TO USE: To explore entity relationships beyond simple
+        co-mention. Find what entities are statistically associated,
+        which topic clusters exist, and which entities bridge different
+        communities.
+
+        Modes:
+        - neighbors: top connections for an entity, ranked by NPMI
+        - community: all entities in the same topic cluster
+        - bridges: entities that connect different communities
+        - stats: graph overview (nodes, edges, communities)
+        """
+        from ..core.graph import get_entity_graph
+
+        try:
+            g = get_entity_graph(rebuild=rebuild)
+
+            if mode == "stats":
+                return {"success": True, **g.stats()}
+
+            if mode == "bridges":
+                return {"success": True, "bridges": g.bridges(n_results)}
+
+            if not entity:
+                return {"success": False, "error": "Provide entity name for neighbors/community mode"}
+
+            if mode == "neighbors":
+                results = g.neighbors(entity, n_results)
+                return {"success": True, "entity": entity, "neighbors": results}
+
+            if mode == "community":
+                members = g.community_members(entity)
+                return {"success": True, "entity": entity, "community_members": members}
+
+            return {"success": False, "error": f"Unknown mode: {mode}"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

@@ -37,6 +37,7 @@ enrich = [
     "spacy>=3.7",
     "scikit-learn>=1.3",
     "rapidfuzz>=3.0",
+    "networkx>=3.0",
 ]
 # Speech-to-text via ONNX Runtime (shared with embedding model)
 transcribe = [
