@@ -47,7 +47,7 @@ _sessions: dict[str, dict] = {}
 def _get_session(session_id: str) -> dict:
     with _session_lock:
         if session_id not in _sessions:
-            _sessions[session_id] = {"last_shown_ids": []}
+            _sessions[session_id] = {"last_shown_ids": [], "fetched_texts": {}}
         return _sessions[session_id]
 
 
@@ -482,6 +482,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 n_results=n_results,
                 topic=topic,
                 subtopic=subtopic,
+                session_id=_default_session_id,
             )
             formatter = _format_compact_result if compact else _format_result
             formatted = [formatter(r) for r in results]
@@ -590,6 +591,21 @@ def _register_tools(mcp: FastMCP) -> None:
 
             all_chunks = [_format_result(row) for row in neighbors]
 
+            # Dedup: remove chunks fetched within TTL window
+            import time as _time
+            session = _get_session(_default_session_id)
+            fetched_texts = session.get("fetched_texts", {})
+            ttl_sec = get_config().get("search.session_ttl_minutes", 30) * 60
+            now = _time.time()
+            # Expire old entries
+            expired = [k for k, t in fetched_texts.items() if now - t > ttl_sec]
+            for k in expired:
+                del fetched_texts[k]
+            before_dedup = len(all_chunks)
+            all_chunks = [c for c in all_chunks if c["chunk_id"] not in fetched_texts]
+            if before_dedup > len(all_chunks):
+                print(f"  [dedup] Removed {before_dedup - len(all_chunks)} already-fetched chunks")
+
             if page_tokens > 0 and all_chunks:
                 pages: list[list[dict]] = [[]]
                 current_tokens = 0
@@ -609,9 +625,11 @@ def _register_tools(mcp: FastMCP) -> None:
                 total_pages = 1
 
             fetched_ids = [c["chunk_id"] for c in chunks]
-            if chunk_id and chunk_id not in fetched_ids:
-                fetched_ids.append(chunk_id)
-            session = _get_session(_default_session_id)
+
+            # Track fetched chunks for dedup (with timestamp for TTL expiry)
+            for c in chunks:
+                session["fetched_texts"][c["chunk_id"]] = _time.time()
+
             last_shown = session.get("last_shown_ids", [])
             ignored_from_last = [cid for cid in last_shown if cid not in fetched_ids] if last_shown else []
             try:
@@ -823,6 +841,7 @@ def _register_tools(mcp: FastMCP) -> None:
             with _session_lock:
                 if _default_session_id in _sessions:
                     _sessions[_default_session_id]["last_shown_ids"] = []
+                    _sessions[_default_session_id]["fetched_texts"] = {}
             return {"success": True, "message": "Session fetch history cleared. All chunks are full-score eligible."}
         except Exception as e:
             return {"success": False, "error": str(e)}

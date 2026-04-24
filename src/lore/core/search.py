@@ -369,13 +369,13 @@ class SearchEngine:
         except Exception:
             return chunk
 
-    def search_multi_hop(self, query, provider, n_results=5, topic=None, subtopic=None):
+    def search_multi_hop(self, query, provider, n_results=5, topic=None, subtopic=None, session_id=None):
         cfg = self._cfg
         max_queries = cfg.get("search.multi_hop_max_queries", 4)
         threshold = cfg.get("search.multi_hop_relevance_threshold", 0.1)
 
         if provider is None:
-            return self.search(query, n_results, topic, subtopic)
+            return self.search(query, n_results, topic, subtopic, session_id=session_id)
 
         try:
             prompt = _DECOMPOSE_PROMPT.format(max_queries=max_queries, query=query)
@@ -396,7 +396,7 @@ class SearchEngine:
         all_by_id: dict[str, dict] = {}
 
         for sq in sub_queries:
-            results = self.search(sq, n_results=per_query_n, topic=topic, subtopic=subtopic)
+            results = self.search(sq, n_results=per_query_n, topic=topic, subtopic=subtopic, session_id=session_id)
             ranked_ids = [r["id"] for r in results]
             for r in results:
                 if r["id"] not in all_by_id:
