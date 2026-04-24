@@ -397,8 +397,6 @@ def _register_tools(mcp: FastMCP) -> None:
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
         topic: Annotated[str | None, Field(default=None, description="Filter by topic (e.g. '3d', 'ai', 'code'). Use intro to see available topics.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic (e.g. 'blender', 'houdini').")] = None,
-        compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only (title, summary, score, token_count, location) without full text. Set false to include full chunk text inline.")] = True,
-        expand: Annotated[bool, Field(default=False, description="If true, return parent-expanded context (surrounding chunks) for each result. Only applies when compact=false.")] = False,
     ) -> dict:
         """Step 1: Search the knowledge base. Returns compact results (~50 tokens each).
 
@@ -406,9 +404,9 @@ def _register_tools(mcp: FastMCP) -> None:
         queries, how-to questions, or locating specific content. Keep queries
         short and specific. For complex multi-topic questions, use search_deep.
 
-        RETURNS: Compact results by default — score, title, summary, keywords,
-        location. Scan these first, then call get_context for full text of
-        promising hits. Set compact=false only when you need inline text.
+        RETURNS: Compact metadata only — score, title, summary, keywords,
+        location. Scan these, then call get_context for full text of
+        promising hits.
         """
         try:
             engine = get_search_engine()
@@ -417,10 +415,10 @@ def _register_tools(mcp: FastMCP) -> None:
                 n_results=n_results,
                 topic=topic,
                 subtopic=subtopic,
-                expand=expand and not compact,
+                expand=False,
                 session_id=_default_session_id,
             )
-            formatter = _format_compact_result if compact else _format_result
+            formatter = _format_compact_result
             formatted = [formatter(r) for r in results]
 
             shown_ids = [f["chunk_id"] for f in formatted]
@@ -438,7 +436,6 @@ def _register_tools(mcp: FastMCP) -> None:
                 "success": True,
                 "query": query,
                 "total": len(results),
-                "compact": compact,
                 "results": formatted,
             }
         except Exception as e:
@@ -452,7 +449,6 @@ def _register_tools(mcp: FastMCP) -> None:
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
         topic: Annotated[str | None, Field(default=None, description="Filter by topic.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic.")] = None,
-        compact: Annotated[bool, Field(default=True, description="If true (default), return metadata only without full text. Set false to include full chunk text.")] = True,
     ) -> dict:
         """Deep search using multi-hop query decomposition.
 
@@ -461,12 +457,10 @@ def _register_tools(mcp: FastMCP) -> None:
         Slower than search (makes LLM calls) but better for questions that
         need information from multiple sources.
 
-        WHEN TO USE: For complex questions like "Compare how Blender and
-        Houdini handle fluid simulation" or "What are all the steps to set
-        up a full render pipeline?" Falls back to regular search if no LLM
-        provider is configured.
+        WHEN TO USE: For complex questions spanning multiple topics.
+        Falls back to regular search if no LLM provider is configured.
 
-        RETURNS: Same format as search. Compact by default (metadata only).
+        RETURNS: Compact metadata only, same format as search.
         Set compact=false for full text inline.
 
         REQUIRES: An active LLM provider configured in Lore (e.g. OpenRouter
@@ -485,8 +479,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 subtopic=subtopic,
                 session_id=_default_session_id,
             )
-            formatter = _format_compact_result if compact else _format_result
-            formatted = [formatter(r) for r in results]
+            formatted = [_format_compact_result(r) for r in results]
 
             shown_ids = [f["chunk_id"] for f in formatted]
             session = _get_session(_default_session_id)
@@ -503,7 +496,6 @@ def _register_tools(mcp: FastMCP) -> None:
                 "success": True,
                 "query": query,
                 "total": len(results),
-                "compact": compact,
                 "results": formatted,
             }
         except Exception as e:

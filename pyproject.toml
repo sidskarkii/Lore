@@ -52,6 +52,9 @@ local = [
     "llama-cpp-python>=0.3",
 ]
 
+[project.scripts]
+lore = "lore.__main__:main"
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
