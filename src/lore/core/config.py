@@ -40,9 +40,7 @@ _DEFAULTS = {
         "multi_hop_relevance_threshold": 0.1,
     },
     "transcription": {
-        "model": "large-v2",
-        "device": "cuda",
-        "compute_type": "float16",
+        "model": "whisper-medium",
         "language": "en",
     },
     "provider": {

@@ -38,8 +38,9 @@ def _get_ranker():
     if not model:
         return None
 
+    cache_dir = str(cfg.data_dir / "models")
     print(f"  Loading reranker {model}...")
-    _ranker = Ranker(model_name=model)
+    _ranker = Ranker(model_name=model, cache_dir=cache_dir)
     return _ranker
 
 

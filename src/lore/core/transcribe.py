@@ -1,8 +1,7 @@
-"""Transcription — faster-whisper wrapper with per-sentence timestamps.
+"""Transcription — sherpa-onnx offline STT with per-segment timestamps.
 
-Produces segments with start/end timestamps suitable for SRT generation
-and timestamp-linked search results. Handles both audio and video files
-(extracts audio automatically via ffmpeg/av).
+Uses ONNX Runtime (shared with embedding model) for efficient inference.
+Supports Whisper and Moonshine models. CoreML acceleration on Apple Silicon.
 
 Usage:
     from lore.core.transcribe import Transcriber
@@ -10,14 +9,13 @@ Usage:
     t = Transcriber()
     segments = t.transcribe("video.mp4")
     # [{"start": 0.0, "end": 5.28, "text": "Hello everyone..."}, ...]
-
-    t.save_srt(segments, "output.srt")
-    t.save_txt(segments, "output.txt")
 """
 
 from __future__ import annotations
 
 import re
+import subprocess
+import tempfile
 from pathlib import Path
 
 from .config import get_config
@@ -37,87 +35,178 @@ def _srt_time(t: float) -> str:
     return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 
-class Transcriber:
-    """Transcribe audio/video files using faster-whisper.
+def _extract_audio(input_path: str | Path, output_path: str | Path) -> bool:
+    """Extract audio from video file using ffmpeg."""
+    try:
+        subprocess.run(
+            ["ffmpeg", "-i", str(input_path), "-vn", "-acodec", "pcm_s16le",
+             "-ar", "16000", "-ac", "1", str(output_path), "-y"],
+            capture_output=True, check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
 
-    Lazy-loads the model on first use. Model size, device, and compute type
-    are read from config.yaml.
+
+_HF_BASE = "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-{model}/resolve/main"
+
+_MODELS = {
+    "whisper-tiny": "tiny.en",
+    "whisper-medium": "medium.en",
+}
+
+_MODEL_FILES = ["encoder.onnx", "decoder.onnx", "tokens.txt"]
+
+
+class Transcriber:
+    """Transcribe audio/video files using sherpa-onnx.
+
+    Lazy-loads the model on first use. Uses ONNX Runtime with CoreML
+    on Apple Silicon. Default model: Whisper tiny.en (~75MB).
     """
 
     def __init__(self):
-        self._model = None
+        self._recognizer = None
+        self._model_dir = None
 
-    def _get_model(self):
-        if self._model is not None:
-            return self._model
+    def _ensure_model(self) -> Path:
+        """Download model files from HuggingFace if not present."""
+        cfg = get_config()
+        model_name = cfg.get("transcription.model", "whisper-medium")
+        model_variant = _MODELS.get(model_name, "medium.en")
+        model_dir = cfg.data_dir / "models" / model_name
+        model_dir.mkdir(parents=True, exist_ok=True)
 
-        from faster_whisper import WhisperModel
+        base_url = _HF_BASE.format(model=model_variant)
+        for fname in _MODEL_FILES:
+            full_name = f"{model_variant}-{fname}"
+            target = model_dir / full_name
+            if not target.exists() or target.stat().st_size < 100:
+                url = f"{base_url}/{full_name}"
+                print(f"  Downloading {full_name}...")
+                subprocess.run(
+                    ["curl", "-sfL", url, "-o", str(target)],
+                    check=True,
+                )
+                if target.stat().st_size < 1000:
+                    target.unlink()
+                    raise RuntimeError(f"Download too small, likely failed: {url}")
+
+        self._model_dir = model_dir
+        return model_dir
+
+    def _get_recognizer(self):
+        if self._recognizer is not None:
+            return self._recognizer
+
+        import sherpa_onnx
+
+        model_dir = self._ensure_model()
+        cfg = get_config()
+        model_name = cfg.get("transcription.model", "whisper-tiny")
+
+        encoder = list(model_dir.glob("*encoder*"))[0]
+        decoder = list(model_dir.glob("*decoder*"))[0]
+        tokens = list(model_dir.glob("*tokens*"))[0]
 
         cfg = get_config()
-        model_size = cfg.get("transcription.model", "small.en")
-        device = cfg.get("transcription.device", "cpu")
-        compute_type = cfg.get("transcription.compute_type", "int8")
+        lang = cfg.get("transcription.language", "en")
+        print(f"  Loading {model_name} via sherpa-onnx (lang={lang})...")
 
-        # Auto-detect: use CPU with int8 if no CUDA
-        if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    device = "cpu"
-                    compute_type = "int8"
-            except ImportError:
-                device = "cpu"
-                compute_type = "int8"
+        if "moonshine" in model_name:
+            self._recognizer = sherpa_onnx.OfflineRecognizer.from_moonshine(
+                preprocessor=str(model_dir / "preprocess.onnx"),
+                encoder=str(encoder),
+                uncached_decoder=str(model_dir / "uncached_decoder.onnx"),
+                cached_decoder=str(model_dir / "cached_decoder.onnx"),
+                tokens=str(tokens),
+                num_threads=4,
+            )
+        else:
+            self._recognizer = sherpa_onnx.OfflineRecognizer.from_whisper(
+                encoder=str(encoder),
+                decoder=str(decoder),
+                tokens=str(tokens),
+                num_threads=4,
+                language=lang,
+                task="transcribe",
+            )
 
-        print(f"  Loading Whisper {model_size} on {device} ({compute_type})...")
-        self._model = WhisperModel(model_size, device=device, compute_type=compute_type)
-        return self._model
+        return self._recognizer
 
     def transcribe(
         self,
         audio_path: str | Path,
         language: str | None = None,
-        word_timestamps: bool = False,
+        **kwargs,
     ) -> list[dict]:
         """Transcribe an audio or video file.
 
-        Args:
-            audio_path: Path to audio/video file (mp4, mp3, wav, m4a, etc.)
-            language: Language code (e.g. "en"). None = auto-detect.
-            word_timestamps: If True, include word-level timestamps in each segment.
-
-        Returns:
-            List of segments: [{"start": float, "end": float, "text": str, "words": [...]}, ...]
+        Extracts audio to WAV if needed, then runs sherpa-onnx offline recognition.
+        Returns segments with start/end timestamps (~30s windows).
         """
-        cfg = get_config()
-        if language is None:
-            language = cfg.get("transcription.language")
+        audio_path = Path(audio_path)
 
-        model = self._get_model()
+        if audio_path.suffix.lower() != ".wav":
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                wav_path = tmp.name
+            if not _extract_audio(audio_path, wav_path):
+                raise RuntimeError(f"Failed to extract audio from {audio_path}")
+            audio_path = Path(wav_path)
 
-        kwargs = {"word_timestamps": word_timestamps}
-        if language:
-            kwargs["language"] = language
+        recognizer = self._get_recognizer()
 
-        segments_iter, info = model.transcribe(str(audio_path), **kwargs)
+        import wave
+        import numpy as np
+        with wave.open(str(audio_path), "rb") as wf:
+            sample_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            n_frames = wf.getnframes()
+            raw = wf.readframes(n_frames)
 
-        print(f"  Detected language: {info.language} ({info.language_probability:.0%})")
+            if sample_width == 2:
+                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+            elif sample_width == 4:
+                samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+            else:
+                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
+            if n_channels > 1:
+                samples = samples[::n_channels]
+        duration = len(samples) / sample_rate
+
+        window_secs = 30
+        window_samples = int(window_secs * sample_rate)
         segments = []
-        for seg in segments_iter:
-            entry = {
-                "start": seg.start,
-                "end": seg.end,
-                "text": seg.text.strip(),
-            }
-            if word_timestamps and seg.words:
-                entry["words"] = [
-                    {"word": w.word, "start": w.start, "end": w.end, "probability": w.probability}
-                    for w in seg.words
-                ]
-            segments.append(entry)
 
-        print(f"  Transcribed: {len(segments)} segments, {_fmt_ts(info.duration)} duration")
+        offset = 0
+        while offset < len(samples):
+            chunk = samples[offset:offset + window_samples]
+            s = recognizer.create_stream()
+            s.accept_waveform(sample_rate, chunk)
+            recognizer.decode_stream(s)
+
+            text = s.result.text.strip()
+            if text:
+                start_sec = offset / sample_rate
+                end_sec = min(start_sec + len(chunk) / sample_rate, duration)
+                segments.append({
+                    "start": start_sec,
+                    "end": end_sec,
+                    "text": text,
+                })
+            offset += window_samples
+
+        if not segments and duration > 0:
+            s = recognizer.create_stream()
+            s.accept_waveform(sample_rate, samples)
+            recognizer.decode_stream(s)
+            text = s.result.text.strip()
+            if text:
+                segments = [{"start": 0.0, "end": duration, "text": text}]
+
+        print(f"  Transcribed: {len(segments)} segments, {_fmt_ts(len(samples)/sample_rate)} duration")
         return segments
 
     @staticmethod
@@ -138,22 +227,16 @@ class Transcriber:
 
     @staticmethod
     def load_srt(path: str | Path) -> list[dict]:
-        """Load an existing SRT file as segments.
-
-        Use this to skip transcription when subtitles already exist.
-        """
-
+        """Load an existing SRT file as segments."""
         segments = []
         content = Path(path).read_text(encoding="utf-8")
 
-        # Parse SRT format
         blocks = re.split(r"\n\n+", content.strip())
         for block in blocks:
             lines = block.strip().split("\n")
             if len(lines) < 3:
                 continue
 
-            # Parse timestamp line: 00:00:00,000 --> 00:00:05,280
             ts_match = re.match(
                 r"(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})",
                 lines[1],
@@ -172,11 +255,7 @@ class Transcriber:
 
     @staticmethod
     def load_txt(path: str | Path) -> list[dict]:
-        """Load a timestamped text file as segments.
-
-        Expected format: [MM:SS - MM:SS] text
-        """
-
+        """Load a timestamped text file as segments."""
         segments = []
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             match = re.match(r"\[(\d+):(\d+)\s*-\s*(\d+):(\d+)\]\s*(.+)", line)

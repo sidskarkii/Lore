@@ -116,8 +116,30 @@ def _strip_page_markers(text: str) -> str:
     return _PAGE_RE.sub('', text).strip()
 
 
+_BAD_HEADING_RE = re.compile(
+    r"^\d+$"                            # pure page numbers
+    r"|^https?://"                       # URLs
+    r"|^[/\\]"                           # file paths
+    r"|\.{3,}"                           # dot leaders (TOC lines)
+    r"|^\w+\.\w+\("                      # code: function calls
+    r"|^import |^from |^def |^class ",   # code keywords
+    re.IGNORECASE,
+)
+
+
+def _is_valid_heading(title: str) -> bool:
+    """Conservative heading validation — reject obvious non-headings."""
+    if not title or len(title) > 80:
+        return False
+    if _BAD_HEADING_RE.search(title):
+        return False
+    if title.endswith(".") and " " in title and len(title.split()) > 5:
+        return False
+    return True
+
+
 def _split_markdown_sections(md: str) -> list[dict]:
-    """Split markdown text by headers (# / ## / ###)."""
+    """Split markdown text by headers (# / ## / ###), with heading validation."""
     matches = list(_HEADER_RE.finditer(md))
 
     if not matches:
@@ -136,8 +158,15 @@ def _split_markdown_sections(md: str) -> list[dict]:
         start = m.end()
         end = matches[idx + 1].start() if idx + 1 < len(matches) else len(md)
         body = _strip_page_markers(md[start:end]).strip()
-        if body:
+        if not body:
+            continue
+
+        if _is_valid_heading(title):
             sections.append({"title": title, "text": body, "page_num": _find_page_num("", m.start(), md)})
+        elif sections:
+            sections[-1]["text"] += f"\n\n{title}\n{body}"
+        else:
+            sections.append({"title": "(preamble)", "text": f"{title}\n{body}", "page_num": _find_page_num("", m.start(), md)})
 
     return sections
 

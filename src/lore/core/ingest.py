@@ -248,6 +248,29 @@ class Ingester:
             if vid_id and "bilibili" in url and not vid_url.startswith("http"):
                 vid_url = f"https://www.bilibili.com/video/{vid_id}"
 
+            # Fetch full metadata per-video for chapters/tags
+            chapters = entry.get("chapters") or []
+            yt_tags = entry.get("tags") or []
+            channel = entry.get("channel") or ""
+            description = (entry.get("description") or "")[:500]
+            upload_date = entry.get("upload_date") or ""
+            if not chapters and not yt_tags:
+                try:
+                    full = subprocess.run(
+                        [yt_dlp, "--dump-single-json", "--no-warnings", "--no-playlist", vid_url],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    )
+                    if full.returncode == 0:
+                        fdata = json.loads(full.stdout)
+                        chapters = fdata.get("chapters") or []
+                        yt_tags = fdata.get("tags") or []
+                        channel = fdata.get("channel") or channel
+                        description = (fdata.get("description") or "")[:500] or description
+                        upload_date = fdata.get("upload_date") or upload_date
+                        title = fdata.get("title") or title
+                except Exception:
+                    pass
+
             if on_progress:
                 on_progress(IngestionProgress(
                     stage="downloading",
@@ -334,6 +357,13 @@ class Ingester:
                     url=vid_url,
                     source_type="video",
                     contextual=contextual,
+                    chapters=chapters,
+                    yt_metadata={
+                        "tags": yt_tags,
+                        "channel": channel,
+                        "description": description,
+                        "upload_date": upload_date,
+                    },
                 )
                 total_chunks += n
                 print(f"  -> {n} chunks stored")
@@ -655,9 +685,30 @@ class Ingester:
         url: str,
         source_type: str,
         contextual: bool = False,
+        chapters: list[dict] | None = None,
+        yt_metadata: dict | None = None,
     ) -> int:
         """Chunk temporal segments and store. For video/audio sources."""
         chunks = chunk_segments(segments)
+
+        if chapters:
+            for chunk in chunks:
+                start = float(chunk.get("start_sec", 0))
+                for ch in reversed(chapters):
+                    if start >= ch.get("start_time", 0):
+                        ch_title = ch.get("title", "")
+                        if ch_title and not ch_title.startswith("<Untitled"):
+                            chunk["chapter"] = ch_title
+                            chunk["section_heading"] = ch_title
+                        break
+
+        if yt_metadata:
+            tags = yt_metadata.get("tags", [])
+            if tags:
+                for chunk in chunks:
+                    existing = chunk.get("keywords", "")
+                    yt_kw = ", ".join(tags[:8])
+                    chunk["keywords"] = f"{existing}, {yt_kw}" if existing else yt_kw
 
         if contextual:
             chunks = self._apply_contextual_prefixes(chunks, display_name, episode_title)
@@ -672,6 +723,10 @@ class Ingester:
             "url": url,
             "source_type": source_type,
         }
+        if yt_metadata:
+            meta["channel"] = yt_metadata.get("channel", "")
+            meta["upload_date"] = yt_metadata.get("upload_date", "")
+            meta["description"] = yt_metadata.get("description", "")
 
         return self.store.add_chunks(chunks, meta)
 

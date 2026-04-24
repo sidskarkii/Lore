@@ -122,6 +122,10 @@ def _schema(dim: int) -> pa.Schema:
         pa.field("language",         pa.string()),
         pa.field("file_path",        pa.string()),
         pa.field("content_hash",     pa.string()),
+        # source metadata (video/audio)
+        pa.field("channel",          pa.string()),
+        pa.field("upload_date",      pa.string()),
+        pa.field("description",      pa.string()),
     ])
 
 
@@ -157,15 +161,8 @@ class Store:
             required_cols = {f.name for f in _schema(self._dim)}
             missing = required_cols - existing_cols
             if missing:
-                print(f"  [store] Schema migration: adding columns {missing}")
-                try:
-                    for field in _schema(self._dim):
-                        if field.name in missing:
-                            tbl.add_columns({"column": field, "values": None})
-                except Exception as e:
-                    print(f"  [store] Migration failed ({e}), recreating table (data loss)")
-                    self._db.drop_table(self._table_name)
-                    tbl = self._db.create_table(self._table_name, schema=_schema(self._dim))
+                print(f"  [store] Schema has {len(missing)} new columns: {missing}")
+                print(f"  [store] New columns will be populated on next ingest. Existing data preserved.")
             self._table = tbl
         else:
             self._table = self._db.create_table(self._table_name, schema=_schema(self._dim))
@@ -247,6 +244,9 @@ class Store:
                 "language":           chunk.get("language", ""),
                 "file_path":          chunk.get("file_path", meta.get("file_path", "")),
                 "content_hash":       chunk["_hash"],
+                "channel":            meta.get("channel", ""),
+                "upload_date":        meta.get("upload_date", ""),
+                "description":        meta.get("description", ""),
             })
 
         # Remove old chunks for this episode before re-adding
