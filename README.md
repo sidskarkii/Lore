@@ -1,158 +1,155 @@
 # Lore
 
-A local-first knowledge base that AI agents plug into via MCP. Feed it books, documents, videos, code, and web pages. It extracts, chunks, enriches, and indexes everything. Agents search it, browse it, and get smarter over time through interaction logging and relevance feedback.
+**MCP-native universal knowledge base with multi-stage enrichment and cross-source intelligence.**
 
-Not a wrapper around a vector DB. A multi-stage enrichment pipeline that produces chunk titles, section summaries, book overviews, concept tags, and importance scores. Every search result carries enough metadata for an agent to decide what to read without reading it.
+Lore turns any content - books, docs, videos, code, web pages - into a searchable, enriched knowledge layer that AI agents plug into natively via MCP. It doesn't just embed and retrieve. It extracts entities, generates concept tags, builds section summaries, tracks cross-source connections, and learns from agent interactions over time.
 
-## How it works
+Built for macOS Apple Silicon. Local-first: ONNX embeddings, local transcription, no cloud required for core functionality.
+
+## Why this exists
+
+RAG systems typically stop at "chunk text, embed, retrieve." Lore goes further:
+
+- **Multi-stage enrichment** - each chunk gets a title, summary, concept tags, importance score, confidence level, hypothetical questions, and self-containedness flag. Section and book-level summaries synthesize across chunks. A rolling key dictionary (inspired by [MDKeyChunker](https://arxiv.org/abs/2603.23533)) keeps concept tags consistent across hundreds of chunks.
+
+- **Cross-source entity discovery** - a fuzzy entity index (Jaro-Winkler similarity, type-aware merging, adaptive thresholds) automatically finds connections between sources. An entity mentioned in a strategy book links to the same entity in a psychology book without manual tagging.
+
+- **Agent-native design** - 12 MCP tools with progressive disclosure. Compact search results (~50 tokens each) let agents scan before committing context. Built-in dedup, session-aware scoring with TTL, and interaction logging that feeds back into ranking via Wilson Score.
+
+- **Content-agnostic** - same pipeline handles PDFs, EPUBs, YouTube videos (with chapter mapping), audio transcription (sherpa-onnx Whisper), web pages, and code. Not book-specific.
+
+## Architecture
 
 ```
 Agent (Claude Code, Cursor, etc.)
     |
-    | MCP (stdio or HTTP)
+    | MCP (stdio / HTTP)
     v
-Lore MCP Server
-    |
-    +-- Search:       vector + BM25 + entity boost + cross-encoder reranking
-    +-- Embedding:    EmbeddingGemma-300M (ONNX, no PyTorch for inference)
-    +-- Enrichment:   KeyBERT + spaCy NER + multi-stage LLM pipeline
-    +-- Vector store: LanceDB at ~/.lore/store/
-    +-- Metadata:     SQLite at ~/.lore/app.db (interactions, ratings)
-    +-- Archive:      ~/.lore/archive/ (per-source extracted text + enrichment)
++-------------------------------------------+
+|            Lore MCP Server                |
+|                                           |
+|  12 tools: intro, search, search_deep,    |
+|  get_context, get_toc, find_related,      |
+|  entity_index, reset_session, ingest,     |
+|  ingest_status, rate_result,              |
+|  delete_collection                        |
++-------------------+-----------------------+
+                    |
+       +------------+------------+
+       v            v            v
+  +---------+  +---------+  +---------+
+  | Search  |  | Enrich  |  | Entity  |
+  | Pipeline|  | Pipeline|  |  Index  |
+  +----+----+  +----+----+  +----+----+
+       |            |            |
+       v            v            v
+  +---------+  +---------+  +---------+
+  | LanceDB |  | Archive |  | SQLite  |
+  | vectors |  | per-src |  | ratings |
+  +---------+  +---------+  +---------+
 ```
+
+## Search pipeline
+
+Five-signal hybrid retrieval:
+
+1. **Vector similarity** - EmbeddingGemma-300M (ONNX, 188MB, q4 quantized)
+2. **BM25** - LanceDB full-text search
+3. **Entity boost** - query entities expanded through fuzzy entity index, matched against chunk entities + keywords + concept tags
+4. **Reciprocal Rank Fusion** - merges all three signals
+5. **Cross-encoder reranking** - FlashRank ms-marco-MiniLM-L-12-v2
+
+Post-reranking adjustments:
+- **Wilson Score** from interaction history (fetches, ignores, explicit ratings)
+- **Importance boost** from enrichment (1-5 scale)
+- **Session deprioritization** with 30-min TTL (fetched chunks scored lower, expire back to full relevance)
+- **Built-in dedup** - `get_context` never returns chunks the agent already has
+
+## Enrichment pipeline
+
+Research-backed, four-stage pipeline. Each stage gets original text - no telephone game.
+
+| Stage | Method | Output |
+|-------|--------|--------|
+| **1. Classical ML** | KeyBERT + spaCy NER | Keywords, named entities |
+| **2. Chunk enrichment** | LLM with rolling key dict | Title, summary, tags, concept tags, importance (1-5 with rubric), questions, confidence, self-contained flag - 10 fields |
+| **3. Section synthesis** | LLM with concept ledger | Section summary, themes, notable points, tensions. Ledger tracks concept evolution (keep/refine/add/downweight) |
+| **4. Book summary** | LLM with concept aggregation | Overview, themes, takeaways, cross-section patterns |
+
+**Rolling key dictionary** (MDKeyChunker pattern): as chunks are processed, an accumulated dictionary of concept tags is passed to each subsequent chunk. The LLM reuses existing tags when applicable instead of inventing synonyms. Produces ~90% tag reuse rate across a document.
+
+**Concept ledger**: Stage 3 maintains a per-section ledger of concepts with explicit actions - an author contradicting an earlier claim gets `downweight`, a reinforced concept gets `refine`. This produces section summaries that reflect the actual arc of an argument.
+
+## Entity index
+
+Fuzzy entity merging across all collections:
+
+- **Normalization** - NFKD unicode, strip possessives/articles, control characters
+- **Noise filtering** - structural references (chapter numbers, figure labels), generic words
+- **Type correction** - conservative gazetteer for known countries/cities (France typed as PERSON -> GPE)
+- **Adaptive thresholds** - single-token <=5 chars: exact match only. 6-8 chars: 95%. Multi-token: 90%
+- **Type-aware merging** - PERSON and GPE clusters never merge
+
+Cross-source entities surface automatically: a person mentioned in a strategy book connects to the same person in a psychology book without manual linking.
+
+## Agent experience
+
+Three-layer progressive disclosure:
+
+1. **On connect** - dynamic MCP instructions with chunk counts, topics, numbered retrieval workflow with token costs
+2. **`intro` tool** - full orientation: collection summaries with themes, cross-source entities, usage stats, suggested workflows
+3. **Tool docstrings** - step numbers matching the retrieval workflow ("Step 1: search", "Step 3: get_context")
+
+Session intelligence:
+- Interaction logging captures every search, fetch, and rating
+- Wilson Score confidence intervals adjust rankings over time
+- TTL-based re-eligibility (chunks become full-score after 30 min)
+- `reset_session` for immediate refresh after context compaction
+
+## Supported sources
+
+| Source | Extraction | Enrichment |
+|--------|-----------|------------|
+| PDF | pymupdf, font-aware heading detection, chapter pattern fallback, heading validation | Full 4-stage pipeline |
+| EPUB | Spine-based, recursive headings | Full 4-stage pipeline |
+| YouTube | yt-dlp subtitles, chapters -> section headings, tags -> keywords | Full pipeline + video metadata |
+| Audio/Video | sherpa-onnx Whisper medium.en (~1.5GB, auto-downloads, ONNX Runtime) | Transcription + pipeline |
+| Web pages | trafilatura | Full pipeline |
+| Markdown/text | Direct chunking | Full pipeline |
 
 ## Setup
 
 ```bash
-# Clone and install
 git clone https://github.com/sidskarkii/Lore.git
 cd Lore
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[enrich]"
-python -m spacy download en_core_web_sm
-
-# (Optional) Set up an LLM provider for enrichment
-# Create .env in project root:
-echo "LORE_CUSTOM_API_KEY=your-openrouter-key" > .env
-
-# Register with Claude Code
-claude mcp add lore -- $(pwd)/.venv/bin/python -m lore --mcp-stdio
+./scripts/setup.sh
 ```
 
-On first run, the embedding model (~188MB) and reranker (~34MB) download automatically from HuggingFace.
+One command: venv, all deps, spaCy model, system tools (yt-dlp, ffmpeg via brew), `.env` template, full verification.
 
-Enrichment works without an LLM provider (keywords and entities via KeyBERT + spaCy). Add an OpenRouter API key for full enrichment (titles, summaries, concept tags, section summaries, book overviews).
+```bash
+# Register with Claude Code
+claude mcp add lore -- /path/to/Lore/.venv/bin/python -m lore --mcp-stdio
 
-## MCP tools
+# Or run as HTTP server
+python -m lore  # MCP at http://localhost:52105/mcp
+```
 
-| Tool | What it does |
-|------|-------------|
-| `search` | Hybrid retrieval. Compact results by default (metadata only). Entity-boosted via NER |
-| `search_deep` | Multi-hop: decomposes complex queries into sub-queries via LLM |
-| `get_context` | Paginated expansion around a search result. Agent controls page size |
-| `get_toc` | Table of contents for a collection. Sections with chunk counts and token estimates |
-| `ingest` | Non-blocking. Queues the job, returns a job ID immediately |
-| `ingest_status` | Check progress: "Stage 2: chunk titles batch 3/7 (0 cached)" |
-| `list_collections` | What's indexed, with topics and episode counts |
-| `delete_collection` | Remove a collection |
-| `rate_result` | Explicit feedback. Improves future rankings over time |
-| `health` | Server status, chunk count, active models |
+## Tech
 
-## Enrichment pipeline
+Python, LanceDB, ONNX Runtime, FlashRank, sherpa-onnx, SQLite, KeyBERT, spaCy, rapidfuzz, MCP SDK, FastAPI
 
-Ingestion runs a multi-stage pipeline. Each stage gets original text, not distilled-from-distilled.
-
-**Stage 1 -- Classical ML (no LLM)**
-Keywords via KeyBERT, named entities via spaCy NER.
-
-**Stage 2 -- Chunk-level enrichment (LLM)**
-Title, summary, topic tags, concept tags, importance score (1-5). Prompt includes book title, section heading, and chapter name for context.
-
-Concept tags are specific enough to bridge across books: `deception-as-advantage`, `reciprocity-principle`, `perception-control`. These power cross-source discovery.
-
-**Stage 3 -- Section summaries (LLM)**
-Progressive passes over full original text (5000 tokens per pass with running summary). Produces section summary, key concepts, key entities.
-
-**Stage 4 -- Book summary (LLM)**
-Reads all section summaries + table of contents. Produces overview, main themes, key takeaways, book-level tags.
-
-All enrichment is archived per-source at `~/.lore/archive/{collection}/` with `meta.json`, `extracted.md`, `chunks.json`, `section_summaries.json`, and `book_summary.json`.
-
-## Search
-
-Hybrid retrieval pipeline:
-1. Vector similarity (EmbeddingGemma-300M, ONNX)
-2. BM25 full-text search (LanceDB FTS)
-3. Entity-boosted ranking (spaCy extracts entities from query, matches against stored entities + keywords + concept tags)
-4. Reciprocal Rank Fusion merges all three signals
-5. Cross-encoder reranking (FlashRank ms-marco-MiniLM-L-12-v2)
-
-Results are compact by default: chunk ID, score, token count, title, summary, concept tags, importance, location. No full text unless requested. Agent scans metadata, fetches what it needs via `get_context`.
-
-## Chunk IDs
-
-Every token in a chunk ID is meaningful:
-
-| Source | Example |
-|--------|---------|
-| EPUB | `ego_is_the_enemy_ch_the_painful_prologue_0004` |
-| PDF | `the_art_of_war_i_laying_plans_0005` |
-| Video | `blender_tutorial_uv_unwrapping_basics_t04m32s` |
-| Code | `lore_codebase_src_lore_core_search_py_L45-90` |
-| Web | `karpathy_wiki_career_and_research_0002` |
+All models download automatically on first use. No GPU required - runs on CPU with Apple Silicon optimization.
 
 ## Data
 
-All data lives at `~/.lore/` (override with `LORE_DATA_DIR` env var):
-
 ```
 ~/.lore/
-    store/          LanceDB vector store
-    archive/        Per-source: meta.json, extracted.md, chunks.json, summaries
-    app.db          SQLite (interaction logs, chunk ratings)
+    store/              LanceDB vector store
+    archive/            Per-source: meta.json, extracted.md, chunks.json, summaries
+    models/             Reranker + transcription models
+    app.db              SQLite (interactions, ratings)
+    entity_index.json   Fuzzy-merged entity clusters
 ```
 
-Archive means you can wipe the vector store and rebuild from archived enrichment without re-calling LLMs.
-
-## Configuration
-
-`config.yaml` in the project root has defaults for embedding, chunking, search, and transcription.
-
-`config.local.yaml` (gitignored) for provider overrides:
-
-```yaml
-provider:
-  active: custom
-  custom:
-    base_url: https://openrouter.ai/api/v1
-    model: openai/gpt-oss-120b:free
-```
-
-Or use environment variables: `LORE_CUSTOM_BASE_URL`, `LORE_CUSTOM_API_KEY`, `LORE_CUSTOM_MODEL`.
-
-Works with any OpenAI-compatible API: OpenRouter, Ollama, LM Studio, Together, Groq.
-
-## Running
-
-**As MCP server (recommended):**
-```bash
-claude mcp add lore -- /path/to/Lore/.venv/bin/python -m lore --mcp-stdio
-```
-Auto-starts when the agent connects. Zero manual server management.
-
-**As HTTP server (for multi-agent or remote access):**
-```bash
-python -m lore
-# MCP endpoint at http://localhost:52105/mcp
-```
-
-## Tech stack
-
-Python, FastAPI, LanceDB, ONNX Runtime, FlashRank, SQLite, KeyBERT, spaCy, MCP SDK
-
-Models (downloaded automatically): EmbeddingGemma-300M (ONNX, 188MB), ms-marco-MiniLM-L-12-v2 (34MB), all-MiniLM-L6-v2 (KeyBERT, 80MB), en_core_web_sm (spaCy, 12MB)
-
-## Target
-
-macOS, Apple Silicon (M1+), 8GB+ RAM
+Archive means you can wipe the vector store and rebuild without re-calling LLMs.

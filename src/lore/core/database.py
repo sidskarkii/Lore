@@ -50,6 +50,16 @@ CREATE TABLE IF NOT EXISTS chunk_ratings (
     explicit_down INTEGER NOT NULL DEFAULT 0,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS ingestion_log (
+    collection TEXT PRIMARY KEY,
+    source_path TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('started', 'enriching', 'storing', 'done', 'failed')),
+    chunks INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    error TEXT
+);
 """
 
 _SCHEMA = """
@@ -431,6 +441,43 @@ class Database:
             "FROM chunk_ratings "
             "ORDER BY (fetches + explicit_up * 3) - (ignores + explicit_down * 3) DESC LIMIT ?",
             (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- Ingestion Log -------------------------------------------------
+
+    def log_ingest_start(self, collection: str, source_path: str):
+        self._conn.execute(
+            "INSERT INTO ingestion_log (collection, source_path, status, started_at) "
+            "VALUES (?, ?, 'started', ?) "
+            "ON CONFLICT(collection) DO UPDATE SET status='started', source_path=?, started_at=?, error=NULL",
+            (collection, source_path, _now(), source_path, _now()),
+        )
+        self._conn.commit()
+
+    def log_ingest_status(self, collection: str, status: str, chunks: int = 0, error: str | None = None):
+        completed = _now() if status in ("done", "failed") else None
+        self._conn.execute(
+            "UPDATE ingestion_log SET status=?, chunks=?, completed_at=?, error=? WHERE collection=?",
+            (status, chunks, completed, error, collection),
+        )
+        self._conn.commit()
+
+    def get_ingest_log(self, collection: str | None = None) -> list[dict]:
+        if collection:
+            rows = self._conn.execute(
+                "SELECT * FROM ingestion_log WHERE collection=?", (collection,)
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM ingestion_log ORDER BY started_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_resumable_ingests(self) -> list[dict]:
+        """Return ingests that started but didn't complete (crashed mid-pipeline)."""
+        rows = self._conn.execute(
+            "SELECT * FROM ingestion_log WHERE status NOT IN ('done', 'failed')"
         ).fetchall()
         return [dict(r) for r in rows]
 

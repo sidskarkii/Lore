@@ -533,6 +533,8 @@ class Ingester:
         on_progress: ProgressCallback = None,
     ) -> int:
         """Shared pipeline for file and URL ingestion: chunk -> enrich -> store."""
+        from .database import get_database
+
         collection = _sanitize(name)
         with _ingest_lock:
             existing = [c for c in self.store.list_collections() if c["collection"] == collection]
@@ -544,11 +546,27 @@ class Ingester:
         item_name = Path(source_path).name if not source_path.startswith("http") else source_path
 
         try:
-            return self._run_ingest_pipeline(
+            get_database().log_ingest_start(collection, source_path)
+        except Exception:
+            pass
+
+        try:
+            n = self._run_ingest_pipeline(
                 doc=doc, collection=collection, name=name, topic=topic, subtopic=subtopic,
                 source_path=source_path, url_override=url_override, enrich=enrich,
                 on_progress=on_progress, item_name=item_name,
             )
+            try:
+                get_database().log_ingest_status(collection, "done", chunks=n)
+            except Exception:
+                pass
+            return n
+        except Exception as e:
+            try:
+                get_database().log_ingest_status(collection, "failed", error=str(e))
+            except Exception:
+                pass
+            raise
         finally:
             with _ingest_lock:
                 _ingest_in_progress.discard(collection)
