@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 # ── Singletons (thread-safe) ────────────────────────────────────────
 
+from .config import get_config
 from .lifecycle import Slot, get_model_manager
 
 _enrichment_cache: dict[str, dict] | None = None
@@ -570,7 +571,8 @@ def enrich_chunks_stage2(
 
         try:
             last_call = time.time()
-            response = _llm_call_with_retry(provider, [system_msg, user_msg])
+            stage2_model = get_config().get("enrichment.model_stage2", "haiku")
+            response = _llm_call_with_retry(provider, [system_msg, user_msg], model=stage2_model)
             results = _extract_json(response)
 
             if len(results) != len(batch):
@@ -710,7 +712,8 @@ def enrich_section_stage3(
 
         try:
             last_call = time.time()
-            response = _llm_call_with_retry(provider, [system_msg, user_msg])
+            stage3_model = get_config().get("enrichment.model_stage3", "sonnet")
+            response = _llm_call_with_retry(provider, [system_msg, user_msg], model=stage3_model)
             result = _extract_json(response)
             if isinstance(result, list):
                 result = result[0]
@@ -832,7 +835,8 @@ def enrich_book_stage4(
         section_summaries="\n\n".join(summaries_parts),
     )
     try:
-        response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}])
+        stage4_model = get_config().get("enrichment.model_stage4", "sonnet")
+        response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}], model=stage4_model)
         result = _extract_json(response)
         if isinstance(result, list):
             result = result[0]

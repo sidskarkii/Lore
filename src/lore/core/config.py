@@ -45,6 +45,11 @@ _DEFAULTS = {
         "model": "whisper-medium",
         "language": "en",
     },
+    "enrichment": {
+        "model_stage2": "haiku",
+        "model_stage3": "sonnet",
+        "model_stage4": "sonnet",
+    },
     "provider": {
         "active": "custom",
     },

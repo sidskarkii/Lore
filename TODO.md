@@ -4,7 +4,6 @@
 **MCP-native** — no frontend, agents are the UI
 
 ## Immediate (before next feature work)
-- [ ] Full re-ingest — re-ingest all sources with v2 enrichment prompts
 - [ ] Test suite — proper pytest tests, not ad-hoc scripts. Cover: search, entity index, enrichment, ingest, MCP tools
 
 ## Cross-Source Connections
@@ -41,15 +40,7 @@
 - [ ] Same session/conversation thread across progressive passes
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
-## MCP Sampling Integration
-- [ ] MCP sampling as DEFAULT for all enrichment stages — zero config, no API key
-- [ ] External provider as optional upgrade, not requirement
-- [ ] Fallback chain: sampling → configured provider → skip LLM (keywords/entities only)
-
 ## Model Routing
-- [ ] Task-based routing config per stage
-- [ ] Small model for stage 2 (e.g. gemma-3-4b)
-- [ ] Big model for stages 3-5 synthesis
 - [ ] Rate limit fallback: 429 tries next model in chain
 - [ ] Local model override via Ollama
 - [ ] Token/cost tracking per stage
@@ -126,3 +117,6 @@
 - [x] Model lifecycle manager — JIT loading with TTL eviction (5min sweep), refcounted leasing, ~5GB freed after ingest
 - [x] KeyBERT uses shared EmbeddingGemma — eliminated separate all-MiniLM-L6-v2 model (~300MB saved), 2.4x faster extraction
 - [x] Query expansion — LLM rewrites queries into variant phrasings, RRF fusion, expand_query param on MCP search tool, in-memory cache, multi-hop skips expansion
+- [x] Claude CLI provider — zero-config LLM via host subscription (spawns claude subprocess, inherits OAuth token), auto-detected by registry, sequential execution, model selection (haiku/sonnet/opus)
+- [x] Zero-config enrichment — ClaudeProvider replaces MCP sampling plan. Fallback: Claude CLI -> CustomProvider -> skip LLM
+- [x] Per-stage model routing — haiku for stage 2 (chunk titles), sonnet for stages 3-4 (summaries). Configurable via enrichment.model_stage{2,3,4}
