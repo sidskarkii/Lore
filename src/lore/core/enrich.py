@@ -18,7 +18,8 @@ from .lifecycle import Slot, get_model_manager
 
 _enrichment_cache: dict[str, dict] | None = None
 _cache_lock = threading.Lock()
-_kw_slot: Slot | None = None
+_kw_model = None
+_kw_lock = threading.Lock()
 _nlp_slot: Slot | None = None
 
 
@@ -39,9 +40,23 @@ def _get_enrichment_cache() -> dict[str, dict]:
     return _enrichment_cache
 
 
-def _load_keybert():
-    from keybert import KeyBERT
-    return KeyBERT(model="all-MiniLM-L6-v2")
+class _GemmaBackend:
+    """KeyBERT backend using the shared EmbeddingGemma model."""
+
+    def embed(self, documents, verbose=False):
+        import numpy as np
+        from .embed import embed_texts
+        docs = [str(d) for d in documents]
+        return np.asarray(embed_texts(docs), dtype=np.float32)
+
+
+def _get_kw_model():
+    global _kw_model
+    with _kw_lock:
+        if _kw_model is None:
+            from keybert import KeyBERT
+            _kw_model = KeyBERT(model=_GemmaBackend())
+    return _kw_model
 
 
 def _load_spacy():
@@ -51,15 +66,6 @@ def _load_spacy():
     except OSError:
         spacy.cli.download("en_core_web_sm")
         return spacy.load("en_core_web_sm")
-
-
-def _get_kw_slot() -> Slot:
-    global _kw_slot
-    if _kw_slot is None:
-        _kw_slot = get_model_manager().register(
-            "keybert", _load_keybert, ttl=300, ram_mb=300,
-        )
-    return _kw_slot
 
 
 def _get_nlp_slot() -> Slot:
@@ -154,22 +160,18 @@ def enrich_programmatic(chunks: list[dict]) -> list[dict]:
 
 def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
     try:
-        slot = _get_kw_slot()
-        kw_model = slot.acquire()
-        try:
-            results = []
-            for text in texts:
-                if len(text.split()) < 10:
-                    results.append([])
-                    continue
-                kws = kw_model.extract_keywords(
-                    text, keyphrase_ngram_range=(1, 2),
-                    stop_words="english", top_n=6, use_mmr=True, diversity=0.5,
-                )
-                results.append([kw for kw, _ in kws])
-            return results
-        finally:
-            slot.release()
+        kw_model = _get_kw_model()
+        results = []
+        for text in texts:
+            if len(text.split()) < 10:
+                results.append([])
+                continue
+            kws = kw_model.extract_keywords(
+                text, keyphrase_ngram_range=(1, 2),
+                stop_words="english", top_n=6, use_mmr=True, diversity=0.5,
+            )
+            results.append([kw for kw, _ in kws])
+        return results
     except ImportError:
         print("  KeyBERT not installed — skipping keyword extraction")
         return [[] for _ in texts]
