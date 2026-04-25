@@ -171,9 +171,10 @@ class ModelManager:
         return sum(s.ram_mb for s in slots if s.loaded)
 
     def _ensure_sweep(self):
-        if not self._running:
-            self._running = True
-            self._schedule()
+        with self._slots_lock:
+            if not self._running:
+                self._running = True
+                self._schedule()
 
     def _schedule(self):
         self._timer = threading.Timer(_SWEEP_INTERVAL, self._sweep)

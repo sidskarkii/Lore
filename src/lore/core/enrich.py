@@ -571,7 +571,7 @@ def enrich_chunks_stage2(
 
         try:
             last_call = time.time()
-            stage2_model = get_config().get("enrichment.model_stage2", "haiku")
+            stage2_model = get_config().get("enrichment.model_stage2") if hasattr(provider, 'name') and provider.name == "claude" else None
             response = _llm_call_with_retry(provider, [system_msg, user_msg], model=stage2_model)
             results = _extract_json(response)
 
@@ -712,7 +712,7 @@ def enrich_section_stage3(
 
         try:
             last_call = time.time()
-            stage3_model = get_config().get("enrichment.model_stage3", "sonnet")
+            stage3_model = get_config().get("enrichment.model_stage3") if hasattr(provider, 'name') and provider.name == "claude" else None
             response = _llm_call_with_retry(provider, [system_msg, user_msg], model=stage3_model)
             result = _extract_json(response)
             if isinstance(result, list):
@@ -835,7 +835,7 @@ def enrich_book_stage4(
         section_summaries="\n\n".join(summaries_parts),
     )
     try:
-        stage4_model = get_config().get("enrichment.model_stage4", "sonnet")
+        stage4_model = get_config().get("enrichment.model_stage4") if hasattr(provider, 'name') and provider.name == "claude" else None
         response = _llm_call_with_retry(provider, [{"role": "user", "content": prompt}], model=stage4_model)
         result = _extract_json(response)
         if isinstance(result, list):

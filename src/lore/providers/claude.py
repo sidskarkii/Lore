@@ -3,13 +3,12 @@
 Spawns `claude -p` for each completion. Inherits CLAUDE_CODE_OAUTH_TOKEN
 from the parent Claude Code process, so no API key is needed.
 
-Sequential execution: one subprocess at a time via a worker queue.
+Sequential execution: one subprocess at a time via a lock.
 """
 
 from __future__ import annotations
 
 import os
-import queue
 import shutil
 import subprocess
 import threading
@@ -60,7 +59,6 @@ class ClaudeProvider(Provider):
     display_name = "Claude CLI"
 
     def __init__(self):
-        self._queue: queue.Queue = queue.Queue()
         self._lock = threading.Lock()
 
     def detect(self) -> bool:

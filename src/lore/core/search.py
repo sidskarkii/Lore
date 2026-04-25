@@ -290,7 +290,7 @@ class SearchEngine:
             from ..providers.registry import get_registry
             provider = get_registry().active
             if provider is None:
-                print("  [search] query_expansion enabled but no provider configured — set API key in .env")
+                print("  [search] query_expansion enabled but no provider available")
                 return [query]
         except Exception:
             print("  [search] query_expansion enabled but provider unavailable")
@@ -515,6 +515,22 @@ class SearchEngine:
             r = dict(c)
             r["_score"] = round(score, 4)
             results.append(r)
+
+        results = _apply_rating_boost(results)
+
+        if session_id:
+            try:
+                from .database import get_database
+                ttl = cfg.get("search.session_ttl_minutes", 30)
+                fetched_ids = get_database().get_session_fetched_ids(session_id, ttl_minutes=ttl)
+            except Exception:
+                fetched_ids = set()
+            if fetched_ids:
+                for r in results:
+                    if r.get("id") in fetched_ids:
+                        r["_score"] = r.get("_score", 0) * 0.5
+                results.sort(key=lambda r: r.get("_score", 0), reverse=True)
+
         results = [self._expand_to_parent(r) for r in results]
 
         print(f"  [multi-hop] {len(results)} final results from {len(all_by_id)} candidates")
