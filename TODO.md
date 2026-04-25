@@ -4,13 +4,11 @@
 **MCP-native** — no frontend, agents are the UI
 
 ## Immediate (before next feature work)
-- [ ] Full re-ingest — store was wiped by schema migration. Re-ingest all 16 books + 4 diverse sources with v2 enrichment prompts
-- [ ] Safe schema migration — never drop table on column add failure, just warn and continue
+- [ ] Full re-ingest — re-ingest all sources with v2 enrichment prompts
+- [ ] Model lifecycle manager — JIT loading with TTL-based eviction, ~5GB held after ingest currently never freed
 - [ ] Test suite — proper pytest tests, not ad-hoc scripts. Cover: search, entity index, enrichment, ingest, MCP tools
-- [ ] README update — reflect MCP-native architecture, 12 tools, setup instructions
 
 ## Cross-Source Connections
-- [ ] Entity co-occurrence graph weighted by NPMI + Louvain community detection (NetworkX). Finds non-obvious cross-source bridges
 - [ ] BERTopic topic clustering on existing embeddings (UMAP+HDBSCAN) with hierarchical mode
 - [ ] Bipartite graph projection — chunks through shared entities/keywords/tags
 - [ ] Jaccard similarity on keyword/tag sets between chunks — index-time relationship discovery
@@ -39,12 +37,7 @@
 - [ ] Rating persistence across sessions (SQLite survives restarts)
 - [ ] Self-improving pipeline — co-occurrence model, sequence patterns, query-chunk affinity
 
-## Retrieval UX
-- [ ] Built-in dedup — search and get_context never return duplicate content
-- [ ] Search returns all compact by default; agent selectively expands individual results
-
 ## Search
-- [ ] Incremental FTS index updates instead of full rebuild on every ingest
 - [ ] Query expansion via LLM or synonym embeddings
 
 ## Enrichment
@@ -71,9 +64,6 @@
 
 ## Extractors
 - [ ] PDF: fix code block fragmentation on blank lines within code
-
-## Ingestion
-- [ ] Ingestion resume: track completed episodes so crashed ingests can resume
 
 ## Provider & Configuration
 - [ ] Discoverable provider setup — `configure` MCP tool or first-run wizard
@@ -131,3 +121,10 @@
 - [x] Setup script (scripts/setup.sh) — one-command install with verification
 - [x] Codex test suites + collaborative review workflow
 - [x] Batch ingest script + 16 books + 4 diverse content types ingested
+- [x] Entity co-occurrence graph — NPMI weighted edges, Louvain community detection, entity_graph MCP tool, persisted to entity_graph.json
+- [x] Built-in dedup — search and get_context never return duplicate content, TTL-aware expiry
+- [x] Compact-only MCP search — agents get metadata only, expand via get_context
+- [x] Safe schema migration — never drop table on column add failure, just warn and continue
+- [x] Ingestion resume — log_ingest_start/log_ingest_status to ingestion_log table, get_resumable_ingests()
+- [x] README rewrite — portfolio-oriented, architecture diagram, enrichment v2, entity index, agent experience
+- [x] MCP server: 13 tools (added entity_graph tool)

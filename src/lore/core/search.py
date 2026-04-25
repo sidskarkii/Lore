@@ -14,9 +14,10 @@ import math
 from .chunk import fmt_timestamp
 from .config import get_config
 from .embed import embed_texts
+from .lifecycle import Slot, get_model_manager
 from .store import Store, get_store
 
-_ranker = None
+_reranker_slot: Slot | None = None
 _engine_instance: "SearchEngine | None" = None
 
 
@@ -28,34 +29,40 @@ def get_search_engine() -> "SearchEngine":
     return _engine_instance
 
 
-def _get_ranker():
-    global _ranker
-    if _ranker is not None:
-        return _ranker
-
+def _load_reranker():
     cfg = get_config()
     model = cfg.get("search.reranker_model")
     if not model:
         return None
-
     cache_dir = str(cfg.data_dir / "models")
-    print(f"  Loading reranker {model}...")
-    _ranker = Ranker(model_name=model, cache_dir=cache_dir)
-    return _ranker
+    return Ranker(model_name=model, cache_dir=cache_dir)
+
+
+def _get_reranker_slot() -> Slot:
+    global _reranker_slot
+    if _reranker_slot is None:
+        _reranker_slot = get_model_manager().register(
+            "reranker", _load_reranker, ttl=600, ram_mb=300,
+        )
+    return _reranker_slot
 
 
 def _rerank_with_scores(query: str, candidates: list[dict], n: int) -> list[tuple[dict, float]]:
-    ranker = _get_ranker()
-    if ranker is None:
-        return [(c, 1.0) for c in candidates[:n]]
-
+    slot = _get_reranker_slot()
+    ranker = slot.acquire()
     try:
-        passages = [{"id": str(i), "text": c["text"]} for i, c in enumerate(candidates)]
-        reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
-        return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
-    except Exception as e:
-        print(f"  [search] Reranker failed, using RRF order: {e}")
-        return [(c, 1.0) for c in candidates[:n]]
+        if ranker is None:
+            return [(c, 1.0) for c in candidates[:n]]
+
+        try:
+            passages = [{"id": str(i), "text": c["text"]} for i, c in enumerate(candidates)]
+            reranked = ranker.rerank(RerankRequest(query=query, passages=passages))
+            return [(candidates[int(r["id"])], r["score"]) for r in reranked[:n]]
+        except Exception as e:
+            print(f"  [search] Reranker failed, using RRF order: {e}")
+            return [(c, 1.0) for c in candidates[:n]]
+    finally:
+        slot.release()
 
 
 def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
@@ -105,15 +112,19 @@ def _parse_sub_queries(text: str, max_queries: int) -> list[str]:
 def _extract_query_entities(query: str) -> set[str]:
     """Extract entity names from the search query using spaCy, expanded via entity index."""
     try:
-        from .enrich import _get_nlp
-        nlp = _get_nlp()
-        doc = nlp(query)
-        entities = set()
-        for ent in doc.ents:
-            entities.add(ent.text.lower())
-        for token in doc:
-            if token.pos_ == "PROPN":
-                entities.add(token.text.lower())
+        from .enrich import _get_nlp_slot
+        nlp_slot = _get_nlp_slot()
+        nlp = nlp_slot.acquire()
+        try:
+            doc = nlp(query)
+            entities = set()
+            for ent in doc.ents:
+                entities.add(ent.text.lower())
+            for token in doc:
+                if token.pos_ == "PROPN":
+                    entities.add(token.text.lower())
+        finally:
+            nlp_slot.release()
 
         try:
             from .entities import get_entity_index

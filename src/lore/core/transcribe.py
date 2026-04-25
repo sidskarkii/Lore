@@ -1,4 +1,4 @@
-"""Transcription — sherpa-onnx offline STT with per-segment timestamps.
+"""Transcription -- sherpa-onnx offline STT with per-segment timestamps.
 
 Uses ONNX Runtime (shared with embedding model) for efficient inference.
 Supports Whisper and Moonshine models. CoreML acceleration on Apple Silicon.
@@ -19,6 +19,7 @@ import tempfile
 from pathlib import Path
 
 from .config import get_config
+from .lifecycle import Slot, get_model_manager
 
 
 def _fmt_ts(secs: float) -> str:
@@ -57,82 +58,85 @@ _MODELS = {
 
 _MODEL_FILES = ["encoder.onnx", "decoder.onnx", "tokens.txt"]
 
+_whisper_slot: Slot | None = None
+
+
+def _ensure_model_dir() -> Path:
+    """Download model files from HuggingFace if not present."""
+    cfg = get_config()
+    model_name = cfg.get("transcription.model", "whisper-medium")
+    model_variant = _MODELS.get(model_name, "medium.en")
+    model_dir = cfg.data_dir / "models" / model_name
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    base_url = _HF_BASE.format(model=model_variant)
+    for fname in _MODEL_FILES:
+        full_name = f"{model_variant}-{fname}"
+        target = model_dir / full_name
+        if not target.exists() or target.stat().st_size < 100:
+            url = f"{base_url}/{full_name}"
+            print(f"  Downloading {full_name}...")
+            subprocess.run(
+                ["curl", "-sfL", url, "-o", str(target)],
+                check=True,
+            )
+            if target.stat().st_size < 1000:
+                target.unlink()
+                raise RuntimeError(f"Download too small, likely failed: {url}")
+
+    return model_dir
+
+
+def _load_whisper():
+    """Load sherpa-onnx recognizer. Called by lifecycle manager."""
+    import sherpa_onnx
+
+    model_dir = _ensure_model_dir()
+    cfg = get_config()
+    model_name = cfg.get("transcription.model", "whisper-medium")
+
+    encoder = list(model_dir.glob("*encoder*"))[0]
+    decoder = list(model_dir.glob("*decoder*"))[0]
+    tokens = list(model_dir.glob("*tokens*"))[0]
+
+    lang = cfg.get("transcription.language", "en")
+    print(f"  Loading {model_name} via sherpa-onnx (lang={lang})...")
+
+    if "moonshine" in model_name:
+        return sherpa_onnx.OfflineRecognizer.from_moonshine(
+            preprocessor=str(model_dir / "preprocess.onnx"),
+            encoder=str(encoder),
+            uncached_decoder=str(model_dir / "uncached_decoder.onnx"),
+            cached_decoder=str(model_dir / "cached_decoder.onnx"),
+            tokens=str(tokens),
+            num_threads=4,
+        )
+    else:
+        return sherpa_onnx.OfflineRecognizer.from_whisper(
+            encoder=str(encoder),
+            decoder=str(decoder),
+            tokens=str(tokens),
+            num_threads=4,
+            language=lang,
+            task="transcribe",
+        )
+
+
+def _get_whisper_slot() -> Slot:
+    global _whisper_slot
+    if _whisper_slot is None:
+        _whisper_slot = get_model_manager().register(
+            "whisper", _load_whisper, ttl=900, ram_mb=1500,
+        )
+    return _whisper_slot
+
 
 class Transcriber:
     """Transcribe audio/video files using sherpa-onnx.
 
-    Lazy-loads the model on first use. Uses ONNX Runtime with CoreML
-    on Apple Silicon. Default model: Whisper tiny.en (~75MB).
+    Stateless wrapper -- the recognizer is managed by the lifecycle manager
+    and shared across all Transcriber instances.
     """
-
-    def __init__(self):
-        self._recognizer = None
-        self._model_dir = None
-
-    def _ensure_model(self) -> Path:
-        """Download model files from HuggingFace if not present."""
-        cfg = get_config()
-        model_name = cfg.get("transcription.model", "whisper-medium")
-        model_variant = _MODELS.get(model_name, "medium.en")
-        model_dir = cfg.data_dir / "models" / model_name
-        model_dir.mkdir(parents=True, exist_ok=True)
-
-        base_url = _HF_BASE.format(model=model_variant)
-        for fname in _MODEL_FILES:
-            full_name = f"{model_variant}-{fname}"
-            target = model_dir / full_name
-            if not target.exists() or target.stat().st_size < 100:
-                url = f"{base_url}/{full_name}"
-                print(f"  Downloading {full_name}...")
-                subprocess.run(
-                    ["curl", "-sfL", url, "-o", str(target)],
-                    check=True,
-                )
-                if target.stat().st_size < 1000:
-                    target.unlink()
-                    raise RuntimeError(f"Download too small, likely failed: {url}")
-
-        self._model_dir = model_dir
-        return model_dir
-
-    def _get_recognizer(self):
-        if self._recognizer is not None:
-            return self._recognizer
-
-        import sherpa_onnx
-
-        model_dir = self._ensure_model()
-        cfg = get_config()
-        model_name = cfg.get("transcription.model", "whisper-tiny")
-
-        encoder = list(model_dir.glob("*encoder*"))[0]
-        decoder = list(model_dir.glob("*decoder*"))[0]
-        tokens = list(model_dir.glob("*tokens*"))[0]
-
-        cfg = get_config()
-        lang = cfg.get("transcription.language", "en")
-        print(f"  Loading {model_name} via sherpa-onnx (lang={lang})...")
-
-        if "moonshine" in model_name:
-            self._recognizer = sherpa_onnx.OfflineRecognizer.from_moonshine(
-                preprocessor=str(model_dir / "preprocess.onnx"),
-                encoder=str(encoder),
-                uncached_decoder=str(model_dir / "uncached_decoder.onnx"),
-                cached_decoder=str(model_dir / "cached_decoder.onnx"),
-                tokens=str(tokens),
-                num_threads=4,
-            )
-        else:
-            self._recognizer = sherpa_onnx.OfflineRecognizer.from_whisper(
-                encoder=str(encoder),
-                decoder=str(decoder),
-                tokens=str(tokens),
-                num_threads=4,
-                language=lang,
-                task="transcribe",
-            )
-
-        return self._recognizer
 
     def transcribe(
         self,
@@ -154,60 +158,63 @@ class Transcriber:
                 raise RuntimeError(f"Failed to extract audio from {audio_path}")
             audio_path = Path(wav_path)
 
-        recognizer = self._get_recognizer()
+        slot = _get_whisper_slot()
+        recognizer = slot.acquire()
+        try:
+            import wave
+            import numpy as np
+            with wave.open(str(audio_path), "rb") as wf:
+                sample_rate = wf.getframerate()
+                n_channels = wf.getnchannels()
+                sample_width = wf.getsampwidth()
+                n_frames = wf.getnframes()
+                raw = wf.readframes(n_frames)
 
-        import wave
-        import numpy as np
-        with wave.open(str(audio_path), "rb") as wf:
-            sample_rate = wf.getframerate()
-            n_channels = wf.getnchannels()
-            sample_width = wf.getsampwidth()
-            n_frames = wf.getnframes()
-            raw = wf.readframes(n_frames)
+                if sample_width == 2:
+                    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                elif sample_width == 4:
+                    samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+                else:
+                    samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
-            if sample_width == 2:
-                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
-            elif sample_width == 4:
-                samples = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
-            else:
-                samples = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+                if n_channels > 1:
+                    samples = samples[::n_channels]
+            duration = len(samples) / sample_rate
 
-            if n_channels > 1:
-                samples = samples[::n_channels]
-        duration = len(samples) / sample_rate
+            window_secs = 30
+            window_samples = int(window_secs * sample_rate)
+            segments = []
 
-        window_secs = 30
-        window_samples = int(window_secs * sample_rate)
-        segments = []
+            offset = 0
+            while offset < len(samples):
+                chunk = samples[offset:offset + window_samples]
+                s = recognizer.create_stream()
+                s.accept_waveform(sample_rate, chunk)
+                recognizer.decode_stream(s)
 
-        offset = 0
-        while offset < len(samples):
-            chunk = samples[offset:offset + window_samples]
-            s = recognizer.create_stream()
-            s.accept_waveform(sample_rate, chunk)
-            recognizer.decode_stream(s)
+                text = s.result.text.strip()
+                if text:
+                    start_sec = offset / sample_rate
+                    end_sec = min(start_sec + len(chunk) / sample_rate, duration)
+                    segments.append({
+                        "start": start_sec,
+                        "end": end_sec,
+                        "text": text,
+                    })
+                offset += window_samples
 
-            text = s.result.text.strip()
-            if text:
-                start_sec = offset / sample_rate
-                end_sec = min(start_sec + len(chunk) / sample_rate, duration)
-                segments.append({
-                    "start": start_sec,
-                    "end": end_sec,
-                    "text": text,
-                })
-            offset += window_samples
+            if not segments and duration > 0:
+                s = recognizer.create_stream()
+                s.accept_waveform(sample_rate, samples)
+                recognizer.decode_stream(s)
+                text = s.result.text.strip()
+                if text:
+                    segments = [{"start": 0.0, "end": duration, "text": text}]
 
-        if not segments and duration > 0:
-            s = recognizer.create_stream()
-            s.accept_waveform(sample_rate, samples)
-            recognizer.decode_stream(s)
-            text = s.result.text.strip()
-            if text:
-                segments = [{"start": 0.0, "end": duration, "text": text}]
-
-        print(f"  Transcribed: {len(segments)} segments, {_fmt_ts(len(samples)/sample_rate)} duration")
-        return segments
+            print(f"  Transcribed: {len(segments)} segments, {_fmt_ts(len(samples)/sample_rate)} duration")
+            return segments
+        finally:
+            slot.release()
 
     @staticmethod
     def save_srt(segments: list[dict], path: str | Path):

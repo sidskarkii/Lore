@@ -20,9 +20,9 @@ from huggingface_hub import hf_hub_download
 from tokenizers import Tokenizer
 
 from .config import get_config
+from .lifecycle import Slot, get_model_manager
 
-_session = None
-_tokenizer = None
+_slot: Slot | None = None
 
 # Default ONNX variant filenames (configurable in config.yaml)
 _VARIANT_FILES = {
@@ -54,12 +54,8 @@ def _download_model() -> Path:
     return model_dir
 
 
-def _get_session_and_tokenizer():
-    """Lazy-load ONNX session + tokenizer."""
-    global _session, _tokenizer
-    if _session is not None:
-        return _session, _tokenizer
-
+def _load_embedding():
+    """Load ONNX session + tokenizer. Called by lifecycle manager."""
     cfg = get_config()
     device = cfg.embed_device
     variant = cfg.get("embedding.variant", "q4")
@@ -72,7 +68,6 @@ def _get_session_and_tokenizer():
     if not onnx_file.exists():
         raise FileNotFoundError(f"ONNX file not found: {onnx_file}")
 
-    # Set up providers
     if device == "cuda":
         providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
     else:
@@ -80,17 +75,25 @@ def _get_session_and_tokenizer():
 
     sess_opts = ort.SessionOptions()
     sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-    _session = ort.InferenceSession(str(onnx_file), sess_opts, providers=providers)
+    session = ort.InferenceSession(str(onnx_file), sess_opts, providers=providers)
 
-    # Load tokenizer
     tok_file = model_path / "tokenizer.json"
     if not tok_file.exists():
         raise FileNotFoundError(f"tokenizer.json not found in {model_path}")
-    _tokenizer = Tokenizer.from_file(str(tok_file))
-    _tokenizer.enable_padding(pad_id=0, pad_token="<pad>")
-    _tokenizer.enable_truncation(max_length=2048)
+    tokenizer = Tokenizer.from_file(str(tok_file))
+    tokenizer.enable_padding(pad_id=0, pad_token="<pad>")
+    tokenizer.enable_truncation(max_length=2048)
 
-    return _session, _tokenizer
+    return session, tokenizer
+
+
+def _get_slot() -> Slot:
+    global _slot
+    if _slot is None:
+        _slot = get_model_manager().register(
+            "embedding", _load_embedding, ttl=600, ram_mb=500,
+        )
+    return _slot
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:
@@ -101,38 +104,40 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
 
-    cfg = get_config()
-    batch_size = cfg.get("embedding.batch_size", 32)
-    session, tokenizer = _get_session_and_tokenizer()
-    input_names = [inp.name for inp in session.get_inputs()]
+    slot = _get_slot()
+    session, tokenizer = slot.acquire()
+    try:
+        cfg = get_config()
+        batch_size = cfg.get("embedding.batch_size", 32)
+        input_names = [inp.name for inp in session.get_inputs()]
 
-    all_embeddings: list[np.ndarray] = []
+        all_embeddings: list[np.ndarray] = []
 
-    for i in range(0, len(texts), batch_size):
-        batch = texts[i : i + batch_size]
-        encoded = tokenizer.encode_batch(batch)
+        for i in range(0, len(texts), batch_size):
+            batch = texts[i : i + batch_size]
+            encoded = tokenizer.encode_batch(batch)
 
-        input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
-        attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
+            input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
+            attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
 
-        feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
-        if "token_type_ids" in input_names:
-            feeds["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
+            feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
+            if "token_type_ids" in input_names:
+                feeds["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
 
-        outputs = session.run(None, feeds)
-        emb = outputs[0]
+            outputs = session.run(None, feeds)
+            emb = outputs[0]
 
-        # Handle both (batch, dim) and (batch, seq_len, dim) output shapes
-        if emb.ndim == 3:
-            mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
-            emb = (emb * mask_expanded).sum(axis=1) / mask_expanded.sum(axis=1).clip(min=1e-9)
+            if emb.ndim == 3:
+                mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
+                emb = (emb * mask_expanded).sum(axis=1) / mask_expanded.sum(axis=1).clip(min=1e-9)
 
-        # L2 normalize
-        norms = np.linalg.norm(emb, axis=1, keepdims=True).clip(min=1e-9)
-        all_embeddings.append(emb / norms)
+            norms = np.linalg.norm(emb, axis=1, keepdims=True).clip(min=1e-9)
+            all_embeddings.append(emb / norms)
 
-    result = np.concatenate(all_embeddings, axis=0)
-    return result.tolist()
+        result = np.concatenate(all_embeddings, axis=0)
+        return result.tolist()
+    finally:
+        slot.release()
 
 
 def embed_dim() -> int:

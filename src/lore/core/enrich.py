@@ -14,12 +14,12 @@ log = logging.getLogger(__name__)
 
 # ── Singletons (thread-safe) ────────────────────────────────────────
 
+from .lifecycle import Slot, get_model_manager
+
 _enrichment_cache: dict[str, dict] | None = None
 _cache_lock = threading.Lock()
-_kw_model = None
-_kw_lock = threading.Lock()
-_nlp = None
-_nlp_lock = threading.Lock()
+_kw_slot: Slot | None = None
+_nlp_slot: Slot | None = None
 
 
 def _get_enrichment_cache() -> dict[str, dict]:
@@ -39,29 +39,36 @@ def _get_enrichment_cache() -> dict[str, dict]:
     return _enrichment_cache
 
 
-def _get_kw_model():
-    global _kw_model
-    with _kw_lock:
-        if _kw_model is None:
-            from keybert import KeyBERT
-            print("  [enrich] Loading KeyBERT model...")
-            _kw_model = KeyBERT(model="all-MiniLM-L6-v2")
-            print("  [enrich] KeyBERT ready.")
-    return _kw_model
+def _load_keybert():
+    from keybert import KeyBERT
+    return KeyBERT(model="all-MiniLM-L6-v2")
 
 
-def _get_nlp():
-    global _nlp
-    with _nlp_lock:
-        if _nlp is None:
-            import spacy
-            try:
-                _nlp = spacy.load("en_core_web_sm")
-            except OSError:
-                spacy.cli.download("en_core_web_sm")
-                _nlp = spacy.load("en_core_web_sm")
-            print("  [enrich] spaCy ready.")
-    return _nlp
+def _load_spacy():
+    import spacy
+    try:
+        return spacy.load("en_core_web_sm")
+    except OSError:
+        spacy.cli.download("en_core_web_sm")
+        return spacy.load("en_core_web_sm")
+
+
+def _get_kw_slot() -> Slot:
+    global _kw_slot
+    if _kw_slot is None:
+        _kw_slot = get_model_manager().register(
+            "keybert", _load_keybert, ttl=300, ram_mb=300,
+        )
+    return _kw_slot
+
+
+def _get_nlp_slot() -> Slot:
+    global _nlp_slot
+    if _nlp_slot is None:
+        _nlp_slot = get_model_manager().register(
+            "spacy", _load_spacy, ttl=600, ram_mb=80,
+        )
+    return _nlp_slot
 
 
 def _content_hash(text: str) -> str:
@@ -147,18 +154,22 @@ def enrich_programmatic(chunks: list[dict]) -> list[dict]:
 
 def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
     try:
-        kw_model = _get_kw_model()
-        results = []
-        for text in texts:
-            if len(text.split()) < 10:
-                results.append([])
-                continue
-            kws = kw_model.extract_keywords(
-                text, keyphrase_ngram_range=(1, 2),
-                stop_words="english", top_n=6, use_mmr=True, diversity=0.5,
-            )
-            results.append([kw for kw, _ in kws])
-        return results
+        slot = _get_kw_slot()
+        kw_model = slot.acquire()
+        try:
+            results = []
+            for text in texts:
+                if len(text.split()) < 10:
+                    results.append([])
+                    continue
+                kws = kw_model.extract_keywords(
+                    text, keyphrase_ngram_range=(1, 2),
+                    stop_words="english", top_n=6, use_mmr=True, diversity=0.5,
+                )
+                results.append([kw for kw, _ in kws])
+            return results
+        finally:
+            slot.release()
     except ImportError:
         print("  KeyBERT not installed — skipping keyword extraction")
         return [[] for _ in texts]
@@ -166,19 +177,23 @@ def _extract_keywords_batch(texts: list[str]) -> list[list[str]]:
 
 def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
     try:
-        nlp = _get_nlp()
-        results = []
-        for doc in nlp.pipe(texts, batch_size=32):
-            ents = []
-            seen: set[tuple[str, str]] = set()
-            for ent in doc.ents:
-                if ent.label_ in ("PERSON", "ORG", "GPE", "PRODUCT", "WORK_OF_ART", "EVENT", "LAW"):
-                    key = (ent.text, ent.label_)
-                    if key not in seen:
-                        seen.add(key)
-                        ents.append({"name": ent.text, "type": ent.label_})
-            results.append(ents)
-        return results
+        slot = _get_nlp_slot()
+        nlp = slot.acquire()
+        try:
+            results = []
+            for doc in nlp.pipe(texts, batch_size=32):
+                ents = []
+                seen: set[tuple[str, str]] = set()
+                for ent in doc.ents:
+                    if ent.label_ in ("PERSON", "ORG", "GPE", "PRODUCT", "WORK_OF_ART", "EVENT", "LAW"):
+                        key = (ent.text, ent.label_)
+                        if key not in seen:
+                            seen.add(key)
+                            ents.append({"name": ent.text, "type": ent.label_})
+                results.append(ents)
+            return results
+        finally:
+            slot.release()
     except ImportError:
         print("  spaCy not installed — skipping entity extraction")
         return [[] for _ in texts]
