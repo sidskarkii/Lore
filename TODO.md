@@ -5,7 +5,6 @@
 
 ## Immediate (before next feature work)
 - [ ] Full re-ingest — re-ingest all sources with v2 enrichment prompts
-- [ ] Model lifecycle manager — JIT loading with TTL-based eviction, ~5GB held after ingest currently never freed
 - [ ] Test suite — proper pytest tests, not ad-hoc scripts. Cover: search, entity index, enrichment, ingest, MCP tools
 
 ## Cross-Source Connections
@@ -37,13 +36,9 @@
 - [ ] Rating persistence across sessions (SQLite survives restarts)
 - [ ] Self-improving pipeline — co-occurrence model, sequence patterns, query-chunk affinity
 
-## Search
-- [ ] Query expansion via LLM or synonym embeddings
-
 ## Enrichment
 - [ ] Always chunked output — consistent 5000 tok passes
 - [ ] Same session/conversation thread across progressive passes
-- [ ] Reuse EmbeddingGemma for KeyBERT instead of loading separate model
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
 ## MCP Sampling Integration
@@ -128,3 +123,6 @@
 - [x] Ingestion resume — log_ingest_start/log_ingest_status to ingestion_log table, get_resumable_ingests()
 - [x] README rewrite — portfolio-oriented, architecture diagram, enrichment v2, entity index, agent experience
 - [x] MCP server: 13 tools (added entity_graph tool)
+- [x] Model lifecycle manager — JIT loading with TTL eviction (5min sweep), refcounted leasing, ~5GB freed after ingest
+- [x] KeyBERT uses shared EmbeddingGemma — eliminated separate all-MiniLM-L6-v2 model (~300MB saved), 2.4x faster extraction
+- [x] Query expansion — LLM rewrites queries into variant phrasings, RRF fusion, expand_query param on MCP search tool, in-memory cache, multi-hop skips expansion
