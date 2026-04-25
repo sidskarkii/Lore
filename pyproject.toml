@@ -53,7 +53,7 @@ local = [
 ]
 
 [project.scripts]
-lore = "lore.__main__:main"
+lore = "lore.server:main"
 
 [build-system]
 requires = ["hatchling"]

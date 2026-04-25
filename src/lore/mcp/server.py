@@ -111,7 +111,7 @@ def _build_instructions() -> str:
         "- entity_graph — co-occurrence graph: NPMI neighbors, topic communities, bridge entities\n"
         "- reset_session — call after context compaction so fetched chunks regain full relevance\n"
         "\n"
-        "Avoid: long multi-sentence queries, compact=false before scanning results, "
+        "Avoid: long multi-sentence queries, "
         "fetching many chunks at once, search_deep for simple lookups."
     )
 
@@ -338,6 +338,15 @@ def _register_tools(mcp: FastMCP) -> None:
             except Exception:
                 health_info = {"status": "ok"}
 
+            model_status = []
+            try:
+                from ..core.lifecycle import get_model_manager
+                mgr = get_model_manager()
+                model_status = mgr.status()
+                health_info["loaded_models_ram_mb"] = mgr.loaded_ram_mb()
+            except Exception:
+                pass
+
             return {
                 "success": True,
                 "overview": {
@@ -347,6 +356,7 @@ def _register_tools(mcp: FastMCP) -> None:
                     "top_tags": [t for t, _ in top_tags],
                 },
                 "health": health_info,
+                "models": model_status,
                 "collections": coll_details,
                 "cross_source_entities": cross_source,
                 "usage": usage,
@@ -461,7 +471,7 @@ def _register_tools(mcp: FastMCP) -> None:
         Falls back to regular search if no LLM provider is configured.
 
         RETURNS: Compact metadata only, same format as search.
-        Set compact=false for full text inline.
+        Use get_context to fetch full text for promising results.
 
         REQUIRES: An active LLM provider configured in Lore (e.g. OpenRouter
         via config.local.yaml). Without one, behaves identically to search.
