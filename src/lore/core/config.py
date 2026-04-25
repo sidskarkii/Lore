@@ -38,6 +38,8 @@ _DEFAULTS = {
         "rrf_k": 60,
         "multi_hop_max_queries": 4,
         "multi_hop_relevance_threshold": 0.1,
+        "query_expansion": False,
+        "query_expansion_n": 2,
     },
     "transcription": {
         "model": "whisper-medium",

@@ -97,6 +97,15 @@ _DECOMPOSE_PROMPT = (
     "on one line.\n\nQuestion: {query}"
 )
 
+_EXPAND_PROMPT = (
+    "Rewrite this search query as {n} short alternative phrasings that would help "
+    "find relevant results. Use different words, angles, or framings. Return one "
+    "query per line, no numbering, no explanations.\n\nQuery: {query}"
+)
+
+_expansion_cache: dict[str, list[str]] = {}
+_EXPANSION_CACHE_MAX = 200
+
 _STRIP_NUMBERING = re.compile(r"^\s*[\d]+[.):\-]\s*")
 
 
@@ -225,6 +234,89 @@ class SearchEngine:
         self.store = store or get_store()
         self._cfg = get_config()
 
+    def _retrieve_once(
+        self, query: str, candidate_count: int, rrf_k: int, where: str | None,
+        label: str = "",
+    ) -> tuple[dict[str, dict], list[str]]:
+        """Single-query retrieval: embed + vector + FTS + entity RRF.
+
+        Returns (all_by_id, ranked_ids).
+        """
+        tag = f"  [{label or 'search'}] " if label else "  [search] "
+        t0 = time.perf_counter()
+
+        query_vec = embed_texts([query])[0]
+        t1 = time.perf_counter()
+
+        vec_results = self.store.vector_search(query_vec, n=candidate_count, where=where)
+        t2 = time.perf_counter()
+
+        fts_results = self.store.fts_search(query, n=candidate_count, where=where)
+        t3 = time.perf_counter()
+
+        all_by_id: dict[str, dict] = {}
+        for r in vec_results + fts_results:
+            if r["id"] not in all_by_id:
+                all_by_id[r["id"]] = r
+
+        vec_ids = [r["id"] for r in vec_results]
+        fts_ids = [r["id"] for r in fts_results]
+
+        query_entities = _extract_query_entities(query)
+        if query_entities:
+            entity_ids = _entity_rank(list(all_by_id.values()), query_entities)
+            rrf_scores = _rrf([vec_ids, fts_ids, entity_ids], k=rrf_k)
+        else:
+            rrf_scores = _rrf([vec_ids, fts_ids], k=rrf_k)
+        t4 = time.perf_counter()
+
+        print(f"{tag}embed={int((t1-t0)*1000)}ms vec={int((t2-t1)*1000)}ms({len(vec_results)}) "
+              f"fts={int((t3-t2)*1000)}ms({len(fts_results)}) rrf={int((t4-t3)*1000)}ms")
+
+        ranked_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
+        return all_by_id, ranked_ids
+
+    def _expand_query(self, query: str) -> list[str]:
+        """Expand a query into variant phrasings via LLM. Returns [original, ...variants]."""
+        if query in _expansion_cache:
+            cached = _expansion_cache[query]
+            print(f"  [search] expanded:     {len(cached)} variants (cached)")
+            return cached
+
+        cfg = self._cfg
+        n = cfg.get("search.query_expansion_n", 2)
+
+        try:
+            from ..providers.registry import get_registry
+            provider = get_registry().active
+            if provider is None:
+                return [query]
+        except Exception:
+            return [query]
+
+        try:
+            prompt = _EXPAND_PROMPT.format(n=n, query=query)
+            raw = provider.chat([{"role": "user", "content": prompt}])
+            variants = _parse_sub_queries(raw, n)
+            seen = {query.lower()}
+            deduped = []
+            for v in variants:
+                if v.lower() not in seen:
+                    seen.add(v.lower())
+                    deduped.append(v)
+            variants = deduped[:n]
+        except Exception:
+            return [query]
+
+        result = [query] + variants
+        if len(_expansion_cache) >= _EXPANSION_CACHE_MAX:
+            _expansion_cache.pop(next(iter(_expansion_cache)))
+        _expansion_cache[query] = result
+        print(f"  [search] expanded:     {len(result)} variants")
+        for i, v in enumerate(result):
+            print(f"    {i}. {v}")
+        return result
+
     def search(
         self,
         query: str,
@@ -233,68 +325,61 @@ class SearchEngine:
         subtopic: str | None = None,
         expand: bool = True,
         session_id: str | None = None,
+        _skip_expansion: bool = False,
     ) -> list[dict]:
         cfg = self._cfg
         candidate_count = cfg.get("search.candidate_count", 30)
         rrf_k = cfg.get("search.rrf_k", 60)
         where = _build_where(topic, subtopic)
+        use_expansion = cfg.get("search.query_expansion", False) and not _skip_expansion
 
         t0 = time.perf_counter()
 
-        # 1. Embed query
-        query_vec = embed_texts([query])[0]
-        t1 = time.perf_counter()
-        print(f"  [search] embed:        {(t1-t0)*1000:.0f}ms")
-
-        # 2. Vector search
-        vec_results = self.store.vector_search(query_vec, n=candidate_count, where=where)
-        t2 = time.perf_counter()
-        print(f"  [search] vector:       {(t2-t1)*1000:.0f}ms  ({len(vec_results)} hits)")
-
-        # 3. FTS search
-        fts_results = self.store.fts_search(query, n=candidate_count, where=where)
-        t3 = time.perf_counter()
-        print(f"  [search] fts:          {(t3-t2)*1000:.0f}ms  ({len(fts_results)} hits)")
-
-        # 4. RRF fusion (vector + FTS + entity overlap)
-        all_by_id: dict[str, dict] = {}
-        for r in vec_results + fts_results:
-            if r["id"] not in all_by_id:
-                all_by_id[r["id"]] = r
-
-        vec_ids = [r["id"] for r in vec_results] if vec_results else []
-        fts_ids = [r["id"] for r in fts_results] if fts_results else []
-
-        query_entities = _extract_query_entities(query)
-        if query_entities:
-            entity_ids = _entity_rank(list(all_by_id.values()), query_entities)
-            rrf_scores = _rrf([vec_ids, fts_ids, entity_ids], k=rrf_k)
-            print(f"  [search] entities:     {len(query_entities)} query entities, {len(entity_ids)} matches")
+        # 1. Query expansion (if enabled and provider available)
+        if use_expansion:
+            queries = self._expand_query(query)
         else:
-            rrf_scores = _rrf([vec_ids, fts_ids], k=rrf_k)
+            queries = [query]
 
-        candidates = sorted(
-            [r for r in all_by_id.values() if r["id"] in rrf_scores],
-            key=lambda r: rrf_scores.get(r["id"], 0),
-            reverse=True,
-        )[:n_results * 4]
-        t4 = time.perf_counter()
-        print(f"  [search] rrf:          {(t4-t3)*1000:.0f}ms  ({len(candidates)} candidates)")
+        # 2. Retrieve for each query variant
+        all_by_id: dict[str, dict] = {}
+        all_ranked_lists: list[list[str]] = []
 
-        # 5. Rerank
+        for q in queries:
+            by_id, ranked = self._retrieve_once(q, candidate_count, rrf_k, where)
+            for rid, chunk in by_id.items():
+                if rid not in all_by_id:
+                    all_by_id[rid] = chunk
+            all_ranked_lists.append(ranked)
+
+        t1 = time.perf_counter()
+        print(f"  [search] retrieve:     {(t1-t0)*1000:.0f}ms  ({len(queries)} queries, {len(all_by_id)} unique)")
+
+        # 3. Cross-variant RRF fusion
+        if len(all_ranked_lists) > 1:
+            fused_scores = _rrf(all_ranked_lists, k=rrf_k)
+            candidates = sorted(
+                [r for r in all_by_id.values() if r["id"] in fused_scores],
+                key=lambda r: fused_scores.get(r["id"], 0),
+                reverse=True,
+            )[:n_results * 4]
+        else:
+            candidates = [all_by_id[rid] for rid in all_ranked_lists[0] if rid in all_by_id][:n_results * 4]
+
+        # 4. Rerank against ORIGINAL query
         scored = _rerank_with_scores(query, candidates, n_results)
         results = []
         for c, score in scored:
             r = dict(c)
             r["_score"] = round(score, 4)
             results.append(r)
-        t5 = time.perf_counter()
-        print(f"  [search] rerank:       {(t5-t4)*1000:.0f}ms  ({len(results)} results)")
+        t2 = time.perf_counter()
+        print(f"  [search] rerank:       {(t2-t1)*1000:.0f}ms  ({len(results)} results)")
 
-        # 6. Rating + importance boost
+        # 5. Rating + importance boost
         results = _apply_rating_boost(results)
 
-        # 7. Session-aware deprioritization (with TTL)
+        # 6. Session-aware deprioritization (with TTL)
         if session_id:
             try:
                 from .database import get_database
@@ -310,12 +395,11 @@ class SearchEngine:
                 results.sort(key=lambda r: r.get("_score", 0), reverse=True)
                 print(f"  [search] session:      {len(fetched_ids)} fetched, deprioritized")
 
-        # 8. Parent window expansion
+        # 7. Parent window expansion
         if expand:
             results = [self._expand_to_parent(r) for r in results]
-        t6 = time.perf_counter()
-        print(f"  [search] expand:       {(t6-t5)*1000:.0f}ms")
-        print(f"  [search] TOTAL:        {(t6-t0)*1000:.0f}ms")
+        t3 = time.perf_counter()
+        print(f"  [search] TOTAL:        {(t3-t0)*1000:.0f}ms")
 
         return results
 
@@ -384,40 +468,40 @@ class SearchEngine:
         cfg = self._cfg
         max_queries = cfg.get("search.multi_hop_max_queries", 4)
         threshold = cfg.get("search.multi_hop_relevance_threshold", 0.1)
+        candidate_count = cfg.get("search.candidate_count", 30)
+        rrf_k = cfg.get("search.rrf_k", 60)
+        where = _build_where(topic, subtopic)
 
         if provider is None:
-            return self.search(query, n_results, topic, subtopic, session_id=session_id)
+            return self.search(query, n_results, topic, subtopic, session_id=session_id, _skip_expansion=True)
 
         try:
             prompt = _DECOMPOSE_PROMPT.format(max_queries=max_queries, query=query)
             raw = provider.chat([{"role": "user", "content": prompt}])
             sub_queries = _parse_sub_queries(raw, max_queries)
         except Exception:
-            return self.search(query, n_results, topic, subtopic)
+            return self.search(query, n_results, topic, subtopic, _skip_expansion=True)
 
         if len(sub_queries) <= 1:
-            return self.search(query, n_results, topic, subtopic)
+            return self.search(query, n_results, topic, subtopic, _skip_expansion=True)
 
         print(f"  [multi-hop] {len(sub_queries)} sub-queries:")
         for i, sq in enumerate(sub_queries, 1):
             print(f"    {i}. {sq}")
 
-        per_query_n = max(n_results, 5)
         all_ranked_ids: list[list[str]] = []
         all_by_id: dict[str, dict] = {}
 
         for sq in sub_queries:
-            results = self.search(sq, n_results=per_query_n, topic=topic, subtopic=subtopic, session_id=session_id)
-            ranked_ids = [r["id"] for r in results]
-            for r in results:
-                if r["id"] not in all_by_id:
-                    all_by_id[r["id"]] = r
-            all_ranked_ids.append(ranked_ids)
+            by_id, ranked = self._retrieve_once(sq, candidate_count, rrf_k, where)
+            for rid, chunk in by_id.items():
+                if rid not in all_by_id:
+                    all_by_id[rid] = chunk
+            all_ranked_ids.append(ranked)
 
         if not all_by_id:
-            return self.search(query, n_results, topic, subtopic)
+            return self.search(query, n_results, topic, subtopic, _skip_expansion=True)
 
-        rrf_k = cfg.get("search.rrf_k", 60)
         rrf_scores = _rrf(all_ranked_ids, k=rrf_k)
         candidates = sorted(all_by_id.values(), key=lambda r: rrf_scores.get(r["id"], 0), reverse=True)[:n_results * 4]
 
