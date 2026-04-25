@@ -378,11 +378,11 @@ def _llm_call(provider, messages, model=None) -> str:
         raise _classify_error(e) from e
 
 
-def _llm_call_with_retry(provider, messages, max_retries: int = 2) -> str:
+def _llm_call_with_retry(provider, messages, max_retries: int = 2, model: str | None = None) -> str:
     """Retry on rate limits and timeouts. Raises _ModerationBlock immediately."""
     for attempt in range(max_retries + 1):
         try:
-            return _llm_call(provider, messages)
+            return _llm_call(provider, messages, model=model)
         except _ModerationBlock:
             raise
         except (_RateLimit, _Timeout):

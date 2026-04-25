@@ -15,13 +15,32 @@ class ProviderRegistry:
         self._register_all()
 
     def _register_all(self):
+        from .claude import ClaudeProvider
         from .custom import CustomProvider
 
-        provider = CustomProvider()
-        self._providers[provider.name] = provider
+        for p in [ClaudeProvider(), CustomProvider()]:
+            self._providers[p.name] = p
 
         cfg = get_config()
-        self._active = cfg.get("provider.active", "custom")
+        configured = cfg.get("provider.active")
+
+        if configured and configured in self._providers:
+            try:
+                if self._providers[configured].detect():
+                    self._active = configured
+                    return
+            except Exception:
+                pass
+
+        for name in ("claude", "custom"):
+            try:
+                if self._providers[name].detect():
+                    self._active = name
+                    return
+            except Exception:
+                continue
+
+        self._active = "custom"
 
     @property
     def active(self) -> Provider | None:
@@ -61,11 +80,16 @@ class ProviderRegistry:
         return result
 
 
+import threading
+
 _registry: ProviderRegistry | None = None
+_registry_lock = threading.Lock()
 
 
 def get_registry() -> ProviderRegistry:
     global _registry
     if _registry is None:
-        _registry = ProviderRegistry()
+        with _registry_lock:
+            if _registry is None:
+                _registry = ProviderRegistry()
     return _registry
