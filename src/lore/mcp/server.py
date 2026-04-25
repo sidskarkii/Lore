@@ -407,6 +407,7 @@ def _register_tools(mcp: FastMCP) -> None:
         n_results: Annotated[int, Field(default=5, ge=1, le=20, description="Number of results to return.")] = 5,
         topic: Annotated[str | None, Field(default=None, description="Filter by topic (e.g. '3d', 'ai', 'code'). Use intro to see available topics.")] = None,
         subtopic: Annotated[str | None, Field(default=None, description="Filter by subtopic (e.g. 'blender', 'houdini').")] = None,
+        expand_query: Annotated[bool, Field(default=False, description="LLM-rewrite the query into variant phrasings for better recall. Requires a configured LLM provider (LORE_CUSTOM_API_KEY env var).")] = False,
     ) -> dict:
         """Step 1: Search the knowledge base. Returns compact results (~50 tokens each).
 
@@ -427,6 +428,7 @@ def _register_tools(mcp: FastMCP) -> None:
                 subtopic=subtopic,
                 expand=False,
                 session_id=_default_session_id,
+                _force_expansion=expand_query,
             )
             formatter = _format_compact_result
             formatted = [formatter(r) for r in results]

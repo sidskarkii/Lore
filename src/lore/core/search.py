@@ -290,8 +290,10 @@ class SearchEngine:
             from ..providers.registry import get_registry
             provider = get_registry().active
             if provider is None:
+                print("  [search] query_expansion enabled but no provider configured — set API key in .env")
                 return [query]
         except Exception:
+            print("  [search] query_expansion enabled but provider unavailable")
             return [query]
 
         try:
@@ -326,12 +328,13 @@ class SearchEngine:
         expand: bool = True,
         session_id: str | None = None,
         _skip_expansion: bool = False,
+        _force_expansion: bool = False,
     ) -> list[dict]:
         cfg = self._cfg
         candidate_count = cfg.get("search.candidate_count", 30)
         rrf_k = cfg.get("search.rrf_k", 60)
         where = _build_where(topic, subtopic)
-        use_expansion = cfg.get("search.query_expansion", False) and not _skip_expansion
+        use_expansion = _force_expansion or (cfg.get("search.query_expansion", False) and not _skip_expansion)
 
         t0 = time.perf_counter()
 
