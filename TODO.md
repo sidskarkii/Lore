@@ -13,15 +13,31 @@
 - [ ] BERTopic — deferred (concept_tags + NPMI + Louvain already sufficient, avoids umap/hdbscan deps)
 
 ## Wiki Layer (Karpathy LLM Wiki pattern)
-- [ ] **Source summary pages** — one per source, auto-generated after ingestion
-- [ ] **Concept pages** — one per major topic, synthesized across all sources
-- [ ] **Entity pages** — one per person/org/tool, consolidated from fuzzy-merged NER
-- [ ] **Synthesis pages** — cross-cutting comparisons generated on demand
-- [ ] **Cross-references** — every wiki page links to related pages
-- [ ] **Confidence tracking** — claims tagged high/medium/low by corroborating source count
+
+### MVP — build now
+- [ ] **Infrastructure** — ~/.lore/wiki/ directory layout, page schema with YAML frontmatter, pages.json manifest, backlinks.json
+- [ ] **Source pages** — thin wiki wrapper around existing book_summary.json, no new LLM calls
+- [ ] **Entity pages** — one per canonical EntityIndex cluster (threshold: 2+ chunks or 2+ collections or bridge node). Haiku distills evidence, sonnet synthesizes cross-source.
+- [ ] **Concept pages** — one per recurring concept_tag/keyword cluster (threshold: 3+ chunks or 2+ sources). Haiku distills, sonnet synthesizes. Highest-value page type.
+- [ ] **Evidence selection** — deterministic candidate selectors using CrossSourceIndex postings, EntityGraph neighbors, KeywordTagGraph communities. Cap 12-30 chunks per page.
+- [ ] **Claim-level provenance** — each claim stores chunk_ids + source count. Corroboration: low/moderate/high/mixed.
+- [ ] **Cross-references** — page→page, page→source, page→chunks. Backlinks manifest.
+- [ ] **Wiki search** — separate LanceDB wiki_pages table, page fragments indexed, blended with chunk search. Result type identifies chunk vs wiki.
+- [ ] **Dirty-page invalidation** — ingest/delete marks affected pages stale, full regenerate on next access
+- [ ] **MCP tools** — wiki_search, wiki_get_page, wiki_generate_page, wiki_related, wiki_claims, wiki_queue
+- [ ] **Hybrid triggers** — auto-generate source page + top 10 concepts/entities after ingest, rest on-demand
+
+### Phase 2 — after MVP
+- [ ] **Comparison pages** — on-demand synthesis comparing 2-5 sources on a concept/entity
 - [ ] **Lint/audit tool** — periodic health check for orphan pages, contradictions, gaps
-- [ ] **Wiki search** — search raw chunks OR wiki pages
-- [ ] **Incremental wiki updates** — new source triggers updates to existing pages
+- [ ] **Search ranking heuristics** — boost wiki for conceptual queries, penalize for exact-quote queries
+
+### Later — full vision
+- [ ] **Recursive wiki generation** — autonomous "discover and write all missing pages"
+- [ ] **Claim contradiction resolution** — multi-source disagreement detection and surfacing
+- [ ] **Page hierarchy** — parent-child taxonomies, community-based auto-grouping
+- [ ] **Demand-driven generation** — search query signals trigger page creation for popular topics
+- [ ] **Fine-grained trust scoring** — learned from user interaction patterns
 
 ## Session Intelligence
 - [ ] "Related" section in search results — Rocchio + MMR recommendations, labeled with WHY
