@@ -1,13 +1,15 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (13):
+Tools (14):
     intro             — deep orientation: collections, summaries, health, workflows
     search            — hybrid search (vector + BM25 + reranking)
     search_deep       — multi-hop decomposition for complex queries
     get_context       — expand around a search result or read a section
     get_toc           — browse a collection's structure
-    find_related      — cross-source entity connections
+    find_related      — cross-source connections (entity + keyword/tag + Jaccard fusion)
     entity_index      — view/rebuild the fuzzy entity index
+    entity_graph      — entity co-occurrence graph (NPMI, communities, bridges)
+    keyword_graph     — keyword/tag co-occurrence graph (NPMI, communities, bridges)
     reset_session     — clear fetch history after context compaction
     ingest            — auto-detect and ingest content
     ingest_status     — check ingestion progress
@@ -109,6 +111,7 @@ def _build_instructions() -> str:
         "- get_toc(collection) — browse a collection's structure by section\n"
         "- entity_index — view all known entities and cross-source connections\n"
         "- entity_graph — co-occurrence graph: NPMI neighbors, topic communities, bridge entities\n"
+        "- keyword_graph — keyword/tag co-occurrence: NPMI neighbors, topic clusters, bridge terms\n"
         "- reset_session — call after context compaction so fetched chunks regain full relevance\n"
         "\n"
         "Avoid: long multi-sentence queries, "
@@ -904,114 +907,35 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     def find_related(
-        chunk_id: Annotated[str | None, Field(default=None, description="Find chunks related to this chunk via shared entities.")] = None,
-        entity: Annotated[str | None, Field(default=None, description="Find chunks mentioning this entity (fuzzy-matched).")] = None,
+        chunk_id: Annotated[str | None, Field(default=None, description="Find chunks related to this chunk via shared entities, keywords, and tags (fused Dice scoring).")] = None,
+        entity: Annotated[str | None, Field(default=None, description="Find chunks mentioning this entity (fuzzy-matched). Entity-only mode.")] = None,
         collection: Annotated[str | None, Field(default=None, description="Limit results to this collection.")] = None,
         n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Number of results.")] = 10,
     ) -> dict:
-        """Step 4: Discover cross-source connections via shared entities.
+        """Step 4: Discover cross-source connections.
+
+        Two modes:
+        - chunk_id: Fused Dice scoring (0.60*entity + 0.25*keyword + 0.15*tag).
+          Uses postings-based candidate generation — only scores chunks that
+          share at least one entity, keyword, or tag. Fast even at large scale.
+        - entity: Entity-only lookup via postings. Finds all chunks mentioning
+          a specific entity, with fuzzy name matching.
 
         WHEN TO USE: After finding a useful chunk, discover what other
-        sources say about the same people, concepts, or organizations.
-        Resolves name variants automatically (fuzzy matching).
-
-        Provide chunk_id (finds chunks sharing its entities) or entity
-        name (finds all chunks mentioning that entity across collections).
+        sources say about the same topics.
         """
-        from ..core.entities import get_entity_index
+        from ..core.cross_index import get_cross_index
 
         try:
-            idx = get_entity_index()
-            store = get_store()
+            cx = get_cross_index()
 
-            target_entities: list[str] = []
+            if entity and not chunk_id:
+                return cx.find_by_entity(entity, collection=collection, n_results=n_results)
 
             if chunk_id:
-                chunk = store.get_chunk_by_id(chunk_id)
-                if not chunk:
-                    return {"success": False, "error": f"Chunk not found: {chunk_id}"}
-                ents_raw = chunk.get("entities", "")
-                if ents_raw:
-                    try:
-                        ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
-                        target_entities = [e.get("name", "") for e in ents if isinstance(e, dict) and e.get("name")]
-                    except (json.JSONDecodeError, TypeError):
-                        pass
-                if not target_entities:
-                    return {"success": True, "chunk_id": chunk_id, "message": "No entities found on this chunk", "results": []}
+                return cx.find_related(chunk_id, collection=collection, n_results=n_results)
 
-            elif entity:
-                target_entities = [entity]
-            else:
-                return {"success": False, "error": "Provide chunk_id or entity name"}
-
-            canonical_entities = set()
-            for ent in target_entities:
-                cluster = idx.resolve(ent)
-                if cluster:
-                    canonical_entities.add(cluster.canonical)
-
-            if not canonical_entities:
-                canonical_entities = {e.lower() for e in target_entities}
-
-            all_variant_names = set()
-            for canonical in canonical_entities:
-                for cluster in idx.clusters:
-                    if cluster.canonical == canonical:
-                        all_variant_names.update(v.lower() for v in cluster.variants)
-
-            if not all_variant_names:
-                all_variant_names = {e.lower() for e in target_entities}
-
-            collections = store.list_collections()
-            related_chunks = []
-
-            for coll in collections:
-                if collection and coll["collection"] != collection:
-                    continue
-                try:
-                    chunks = store.get_all_chunks(coll["collection"])
-                except Exception:
-                    continue
-
-                for c in chunks:
-                    if chunk_id and c.get("id") == chunk_id:
-                        continue
-                    ents_raw = c.get("entities", "")
-                    if not ents_raw:
-                        continue
-                    try:
-                        ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
-                        chunk_ent_names = [e.get("name", "") for e in ents if isinstance(e, dict) and e.get("name")]
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-
-                    shared = set()
-                    for chunk_ent in chunk_ent_names:
-                        cluster = idx.resolve(chunk_ent)
-                        if cluster and cluster.canonical in canonical_entities:
-                            shared.add(cluster.canonical)
-
-                    if shared:
-                        related_chunks.append({
-                            "chunk_id": c.get("id", ""),
-                            "collection": c.get("collection", ""),
-                            "episode_title": c.get("episode_title", ""),
-                            "shared_entities": sorted(shared),
-                            "match_count": len(shared),
-                        })
-
-            related_chunks.sort(key=lambda x: x["match_count"], reverse=True)
-            total_found = len(related_chunks)
-            related_chunks = related_chunks[:n_results]
-
-            return {
-                "success": True,
-                "query_entities": sorted(canonical_entities),
-                "total_related": total_found,
-                "returned": len(related_chunks),
-                "results": related_chunks,
-            }
+            return {"success": False, "error": "Provide chunk_id or entity name"}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
@@ -1097,6 +1021,58 @@ def _register_tools(mcp: FastMCP) -> None:
             if mode == "community":
                 members = g.community_members(entity)
                 return {"success": True, "entity": entity, "community_members": members}
+
+            return {"success": False, "error": f"Unknown mode: {mode}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── keyword_graph ──────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def keyword_graph(
+        term: Annotated[str | None, Field(default=None, description="Keyword or concept tag to inspect. Can use namespace prefix (kw:X or tag:Y) or bare term.")] = None,
+        mode: Annotated[str, Field(default="neighbors", description="Query mode: 'neighbors' (top NPMI connections), 'community' (same topic cluster), 'bridges' (terms connecting communities), 'stats' (graph overview).")] = "neighbors",
+        n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Number of results.")] = 10,
+        rebuild: Annotated[bool, Field(default=False, description="Force rebuild the keyword/tag co-occurrence graph.")] = False,
+    ) -> dict:
+        """Query the keyword/tag co-occurrence graph.
+
+        Keywords and concept tags that appear together in chunks are
+        connected by NPMI-weighted edges. Nodes are namespaced (kw:X for
+        keywords, tag:Y for concept tags). Louvain community detection
+        groups related terms into topic clusters.
+
+        WHEN TO USE: To explore topical structure of the knowledge base.
+        Find what keywords and tags are statistically associated, discover
+        topic clusters, and find bridge terms connecting different domains.
+
+        Modes:
+        - neighbors: top NPMI connections for a term
+        - community: all terms in the same topic cluster
+        - bridges: terms that connect different communities
+        - stats: graph overview (nodes, edges, keyword/tag counts)
+        """
+        from ..core.graph import get_keyword_graph
+
+        try:
+            g = get_keyword_graph(rebuild=rebuild)
+
+            if mode == "stats":
+                return {"success": True, **g.stats()}
+
+            if mode == "bridges":
+                return {"success": True, "bridges": g.bridges(n_results)}
+
+            if not term:
+                return {"success": False, "error": "Provide term for neighbors/community mode"}
+
+            if mode == "neighbors":
+                results = g.neighbors(term, n_results)
+                return {"success": True, "term": term, "neighbors": results}
+
+            if mode == "community":
+                members = g.community_members(term)
+                return {"success": True, "term": term, "community_members": members}
 
             return {"success": False, "error": f"Unknown mode: {mode}"}
         except Exception as e:

@@ -129,6 +129,19 @@ def _schema(dim: int) -> pa.Schema:
     ])
 
 
+def _invalidate_derived_indexes():
+    """Clear all cached derived indexes so they rebuild on next access."""
+    from .entities import invalidate_entity_index
+    from .graph import invalidate_entity_graph, invalidate_keyword_graph
+    from .jaccard import invalidate_jaccard_index
+    from .cross_index import invalidate_cross_index
+    invalidate_entity_index()
+    invalidate_entity_graph()
+    invalidate_keyword_graph()
+    invalidate_jaccard_index()
+    invalidate_cross_index()
+
+
 _store_instance: "Store | None" = None
 
 
@@ -264,6 +277,7 @@ class Store:
         # Refresh table handle after optimize — it deletes old fragment files and
         # the cached reference would point to stale paths on next access
         self._table = self._db.open_table(self._table_name)
+        _invalidate_derived_indexes()
         return len(rows)
 
     def _rebuild_fts(self, tbl):
@@ -293,6 +307,7 @@ class Store:
         tbl = self._get_or_create_table()
         tbl.delete(f"collection = '{_esc(collection)}'")
         self._optimize(tbl)
+        _invalidate_derived_indexes()
 
     def delete_episode(self, collection: str, episode_num: int):
         """Remove chunks for a specific episode."""
@@ -301,6 +316,7 @@ class Store:
             f"collection = '{_esc(collection)}' AND episode_num = {episode_num}"
         )
         self._optimize(tbl)
+        _invalidate_derived_indexes()
 
     # ── Read ──────────────────────────────────────────────────────────
 
@@ -351,22 +367,51 @@ class Store:
         except Exception:
             return None
 
+    _CHUNK_META_COLS = ["id", "title", "summary", "entities", "keywords", "concept_tags",
+                        "importance", "collection", "episode_title", "source_type",
+                        "section_heading", "chapter"]
+
     def get_all_chunks(self, collection: str) -> list[dict]:
-        """Return all chunks for a collection (metadata only, no vectors)."""
+        """Return all chunks for a collection (metadata only, no vectors).
+
+        For callers that need guaranteed completeness (index builders),
+        use iter_chunks() instead — it paginates without a hard cap.
+        """
         tbl = self._get_or_create_table()
         try:
             rows = (
                 tbl.search()
                 .where(f"collection = '{_esc(collection)}'")
-                .select(["id", "title", "summary", "entities", "keywords", "concept_tags",
-                         "importance", "collection", "episode_title", "source_type",
-                         "section_heading", "chapter"])
+                .select(self._CHUNK_META_COLS)
                 .limit(100_000)
                 .to_list()
             )
             return rows
         except Exception:
             return []
+
+    def iter_chunks(self, collection: str, batch_size: int = 5000):
+        """Paginated iterator over all chunks in a collection. No hard cap."""
+        tbl = self._get_or_create_table()
+        offset = 0
+        while True:
+            try:
+                rows = (
+                    tbl.search()
+                    .where(f"collection = '{_esc(collection)}'")
+                    .select(self._CHUNK_META_COLS)
+                    .limit(batch_size)
+                    .offset(offset)
+                    .to_list()
+                )
+            except Exception:
+                break
+            if not rows:
+                break
+            yield from rows
+            if len(rows) < batch_size:
+                break
+            offset += batch_size
 
     def get_toc(self, collection: str) -> list[dict]:
         """Return table-of-contents structure for a collection: ordered sections with chunk counts and token estimates."""

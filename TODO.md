@@ -6,13 +6,11 @@
 ## Immediate (before next feature work)
 - [ ] Test suite — proper pytest tests, not ad-hoc scripts. Cover: search, entity index, enrichment, ingest, MCP tools
 
-## Cross-Source Connections
-- [ ] BERTopic topic clustering on existing embeddings (UMAP+HDBSCAN) with hierarchical mode
-- [ ] Bipartite graph projection — chunks through shared entities/keywords/tags
-- [ ] Jaccard similarity on keyword/tag sets between chunks — index-time relationship discovery
-- [ ] TF-IDF pairwise similarity as RRF signal — ensemble of metrics
-- [ ] PMI/NPMI on KeyBERT keywords across documents
-- [ ] Stage 5: Cross-source connection tagging — classical ML finds candidates, LLM reviews and adds bridging tags
+## Cross-Source Connections (Codex-reviewed design)
+- [ ] **KeywordTagGraph** — sibling to EntityGraph, NPMI on keywords+concept_tags, namespaced nodes (kw:X, tag:Y), Louvain communities, persisted to keyword_graph.json. Share generic co-occurrence helpers with EntityGraph.
+- [ ] **Jaccard similarity index** — precomputed chunk-to-chunk on keyword+tag sets, JSON file (chunk_id → top-N related chunks with jaccard score, shared terms, collection). Rebuild after ingest.
+- [ ] **Fused find_related** — weighted scoring: 0.5*entity_overlap + 0.3*jaccard + 0.2*keyword/tag overlap. Returns shared_entities, shared_keywords, shared_tags, jaccard score.
+- [ ] BERTopic — deferred (concept_tags + NPMI + Louvain already sufficient, avoids umap/hdbscan deps)
 
 ## Wiki Layer (Karpathy LLM Wiki pattern)
 - [ ] **Source summary pages** — one per source, auto-generated after ingestion

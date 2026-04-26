@@ -170,6 +170,7 @@ class EntityIndex:
         self.min_count = min_count
         self.clusters: list[EntityCluster] = []
         self._variant_map: dict[str, int] = {}
+        self._resolve_cache: dict[tuple[str, str], int] = {}
         self._cfg = get_config()
         self._index_path = self._cfg.data_dir / "entity_index.json"
 
@@ -205,12 +206,7 @@ class EntityIndex:
 
         for coll in store.list_collections():
             collection_name = coll["collection"]
-            try:
-                chunks = store.get_all_chunks(collection_name)
-            except Exception:
-                continue
-
-            for chunk in chunks:
+            for chunk in store.iter_chunks(collection_name):
                 ents_raw = chunk.get("entities", "")
                 if not ents_raw:
                     continue
@@ -333,21 +329,32 @@ class EntityIndex:
 
     def _rebuild_variant_map(self):
         self._variant_map = {}
+        self._resolve_cache = {}
         for i, cluster in enumerate(self.clusters):
             for variant in cluster.variants:
                 self._variant_map[variant.lower()] = i
 
     def resolve(self, name: str, entity_type: str = "") -> EntityCluster | None:
-        """Resolve an entity name to its canonical cluster."""
+        """Resolve an entity name to its canonical cluster (cached)."""
         normalized = _normalize(name).lower()
+
+        cache_key = (normalized, entity_type)
+        cached = self._resolve_cache.get(cache_key)
+        if cached is not None:
+            return None if cached < 0 else self.clusters[cached]
+
         idx = self._variant_map.get(normalized)
         if idx is not None and idx < len(self.clusters):
+            self._resolve_cache[cache_key] = idx
             return self.clusters[idx]
 
         threshold = _merge_threshold(normalized, self.threshold)
         best_idx, best_score = self._find_best_cluster(normalized, entity_type)
         if best_score >= threshold and best_idx >= 0:
+            self._resolve_cache[cache_key] = best_idx
             return self.clusters[best_idx]
+
+        self._resolve_cache[cache_key] = -1
         return None
 
     def get_cross_source_entities(self) -> list[EntityCluster]:
@@ -417,3 +424,8 @@ def get_entity_index(rebuild: bool = False) -> EntityIndex:
             return _entity_index
         _entity_index.build_from_store()
     return _entity_index
+
+
+def invalidate_entity_index():
+    global _entity_index
+    _entity_index = None
