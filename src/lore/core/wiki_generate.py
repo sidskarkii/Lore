@@ -142,8 +142,29 @@ def select_evidence_for_entity(
     if len(evidence) < min_chunks:
         return []
 
+    collections = Counter(e.collection for e in evidence)
+    n_colls = len(collections)
+    per_coll_cap = max(max_chunks // max(n_colls, 1), 5)
+
     evidence.sort(key=lambda e: (-e.importance, e.chunk_id))
-    return evidence[:max_chunks]
+    selected: list[EvidenceChunk] = []
+    coll_counts: Counter[str] = Counter()
+    overflow: list[EvidenceChunk] = []
+    for e in evidence:
+        if coll_counts[e.collection] < per_coll_cap:
+            selected.append(e)
+            coll_counts[e.collection] += 1
+        else:
+            overflow.append(e)
+        if len(selected) >= max_chunks:
+            break
+
+    for e in overflow:
+        if len(selected) >= max_chunks:
+            break
+        selected.append(e)
+
+    return selected
 
 
 def select_evidence_for_concept(
@@ -223,10 +244,13 @@ def _get_model(role: str) -> str | None:
     return None
 
 
+_CLAUDE_SHORTHANDS = {"haiku", "sonnet", "opus"}
+
+
 def _llm_chat(messages: list[dict], role: str = "draft") -> str:
     provider = _get_provider()
     model = _get_model(role)
-    if provider.name != "claude":
+    if provider.name != "claude" and model in _CLAUDE_SHORTHANDS:
         model = None
     return provider.chat(messages, model=model)
 
@@ -281,15 +305,23 @@ Rules:
 - Do NOT invent information beyond what the evidence contains"""
 
 
+_MAX_DRAFT_CHARS = 60_000
+_MAX_VERIFY_CHARS = 40_000
+
+
 def _format_evidence_for_llm(evidence: list[EvidenceChunk], target_name: str, page_type: str) -> str:
     parts = [f"Extract key claims about '{target_name}' ({page_type}) from the following evidence chunks:\n"]
+    budget = _MAX_DRAFT_CHARS
     for e in evidence:
-        parts.append(f"--- chunk_id: {e.chunk_id} | collection: {e.collection} | section: {e.section_heading} ---")
-        if e.summary:
-            parts.append(f"Summary: {e.summary}")
+        header = f"--- chunk_id: {e.chunk_id} | collection: {e.collection} | section: {e.section_heading} ---"
+        summary_line = f"Summary: {e.summary}" if e.summary else ""
         text = e.text[:1500] if len(e.text) > 1500 else e.text
-        parts.append(f"Text: {text}")
-        parts.append("")
+        block = f"{header}\n{summary_line}\nText: {text}\n"
+        if budget - len(block) < 0:
+            parts.append(f"(... {len(evidence) - len(parts) + 1} chunks truncated for token budget)")
+            break
+        parts.append(block)
+        budget -= len(block)
     return "\n".join(parts)
 
 
@@ -316,15 +348,21 @@ def draft_claims(evidence: list[EvidenceChunk], target_name: str, page_type: str
             continue
         chunk_ids = [cid for cid in rc.get("chunk_ids", []) if cid in valid_ids]
         collections = list(set(rc.get("collections", [])))
+        status = "pending"
+        note = ""
         if not chunk_ids:
-            chunk_ids = [evidence[0].chunk_id]
-            collections = [evidence[0].collection]
+            status = "review"
+            note = "drafter returned no valid chunk_ids — claim has no provenance"
+            chunk_ids = []
+            collections = []
         claims.append(Claim(
             claim_id=f"claim-{i:03d}",
             text=rc["text"],
             chunk_ids=chunk_ids,
             collections=collections,
             support_count=len(chunk_ids),
+            status=status,
+            verification_note=note,
         ))
 
     print(f"  [wiki_gen] Drafted {len(claims)} claims for {target_name}")
@@ -364,16 +402,24 @@ def verify_claims(
 
     evidence_map = {e.chunk_id: e for e in evidence}
 
+    verifiable = [c for c in claims if c.status != "review"]
+    if not verifiable:
+        return claims
+
     parts = ["Verify each claim against its supporting evidence:\n"]
-    for claim in claims:
-        parts.append(f"## {claim.claim_id}")
-        parts.append(f"Claim: {claim.text}")
-        parts.append(f"Supporting chunks:")
+    budget = _MAX_VERIFY_CHARS
+    for claim in verifiable:
+        block_parts = [f"## {claim.claim_id}", f"Claim: {claim.text}", "Supporting chunks:"]
         for cid in claim.chunk_ids:
             ev = evidence_map.get(cid)
             if ev:
                 text = ev.text[:800] if len(ev.text) > 800 else ev.text
-                parts.append(f"  [{cid}]: {text}")
+                block_parts.append(f"  [{cid}]: {text}")
+        block = "\n".join(block_parts)
+        if budget - len(block) < 0:
+            break
+        parts.append(block)
+        budget -= len(block)
         parts.append("")
 
     response = _llm_chat(
@@ -388,7 +434,7 @@ def verify_claims(
         print(f"  [wiki_gen] Failed to parse verification JSON, marking all as review")
         verdict_map = {}
 
-    for claim in claims:
+    for claim in verifiable:
         v = verdict_map.get(claim.claim_id, {})
         claim.status = v.get("status", "review")
         claim.verification_note = v.get("note", "verification parse failure" if not verdict_map else "")
@@ -495,7 +541,10 @@ Write the complete page now."""
 
 def _find_related_pages(target_name: str, page_type: str, evidence: list[EvidenceChunk]) -> list[str]:
     """Determine related wiki pages from evidence metadata."""
+    from .entities import get_entity_index
+
     wm = get_wiki_manager()
+    ei = get_entity_index()
     existing = {p["page_id"] for p in wm.list_pages()}
 
     related: set[str] = set()
@@ -507,7 +556,9 @@ def _find_related_pages(target_name: str, page_type: str, evidence: list[Evidenc
         for t in e.tags:
             all_tags.add(t.lower())
         for ent in e.entities:
-            all_entities.add(ent.lower())
+            cluster = ei.resolve(ent)
+            canonical = cluster.canonical if cluster else ent
+            all_entities.add(canonical)
         all_collections.add(e.collection)
 
     if page_type == "entity":
