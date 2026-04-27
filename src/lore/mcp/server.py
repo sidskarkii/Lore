@@ -1,20 +1,26 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (14):
-    intro             — deep orientation: collections, summaries, health, workflows
-    search            — hybrid search (vector + BM25 + reranking)
-    search_deep       — multi-hop decomposition for complex queries
-    get_context       — expand around a search result or read a section
-    get_toc           — browse a collection's structure
-    find_related      — cross-source connections (entity + keyword/tag + Jaccard fusion)
-    entity_index      — view/rebuild the fuzzy entity index
-    entity_graph      — entity co-occurrence graph (NPMI, communities, bridges)
-    keyword_graph     — keyword/tag co-occurrence graph (NPMI, communities, bridges)
-    reset_session     — clear fetch history after context compaction
-    ingest            — auto-detect and ingest content
-    ingest_status     — check ingestion progress
-    rate_result       — explicit feedback on search results
-    delete_collection — remove a collection
+Tools (20):
+    intro              — deep orientation: collections, summaries, health, workflows
+    search             — hybrid search (vector + BM25 + reranking)
+    search_deep        — multi-hop decomposition for complex queries
+    get_context        — expand around a search result or read a section
+    get_toc            — browse a collection's structure
+    find_related       — cross-source connections (entity + keyword/tag + Jaccard fusion)
+    entity_index       — view/rebuild the fuzzy entity index
+    entity_graph       — entity co-occurrence graph (NPMI, communities, bridges)
+    keyword_graph      — keyword/tag co-occurrence graph (NPMI, communities, bridges)
+    reset_session      — clear fetch history after context compaction
+    ingest             — auto-detect and ingest content
+    ingest_status      — check ingestion progress
+    rate_result        — explicit feedback on search results
+    delete_collection  — remove a collection
+    wiki_search        — search wiki pages (vector + FTS)
+    wiki_get_page      — read a wiki page by ID or slug
+    wiki_generate_page — generate or refresh a wiki page
+    wiki_related       — browse wiki page connections
+    wiki_claims        — inspect claim-level provenance
+    wiki_queue         — manage stale/missing pages
 """
 
 from __future__ import annotations
@@ -51,6 +57,58 @@ def _get_session(session_id: str) -> dict:
         if session_id not in _sessions:
             _sessions[session_id] = {"last_shown_ids": [], "fetched_texts": {}}
         return _sessions[session_id]
+
+
+def _post_ingest_wiki(collection_display: str):
+    """Auto-generate wiki pages after successful ingest."""
+    try:
+        from ..core.wiki import get_wiki_manager
+        from ..core.ingest import _sanitize
+        wm = get_wiki_manager()
+        coll_id = _sanitize(collection_display)
+        source_count = wm.generate_source_pages(collection=coll_id)
+        if source_count:
+            print(f"  [wiki] Auto-generated {source_count} source pages")
+
+        try:
+            from ..core.wiki_generate import generate_wiki_pages, generate_entity_page, generate_concept_page
+
+            stale = [
+                sp for sp in wm.get_stale_pages()
+                if coll_id in sp.get("source_collections", [])
+            ]
+            refreshed = 0
+            for sp in stale:
+                pid = sp["page_id"]
+                ptype = sp.get("page_type", "")
+                slug = pid.split("/", 1)[-1] if "/" in pid else pid
+                try:
+                    if ptype == "entity":
+                        generate_entity_page(sp.get("title", slug), force=True)
+                        refreshed += 1
+                    elif ptype == "concept":
+                        generate_concept_page(slug, force=True)
+                        refreshed += 1
+                except Exception:
+                    pass
+            if refreshed:
+                print(f"  [wiki] Refreshed {refreshed} stale pages")
+
+            concept_pages = generate_wiki_pages(page_type="concept", limit=10, min_chunks=3)
+            entity_pages = generate_wiki_pages(page_type="entity", limit=10, min_chunks=2)
+            total = len(concept_pages) + len(entity_pages)
+            if total:
+                print(f"  [wiki] Auto-generated {len(concept_pages)} concept + {len(entity_pages)} entity pages")
+        except Exception as e:
+            print(f"  [wiki] Skipped concept/entity generation (no LLM provider): {e}")
+
+        try:
+            from ..core.wiki_index import rebuild_fts
+            rebuild_fts()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"  [wiki] Post-ingest wiki generation failed: {e}")
 
 
 _default_session_id = uuid.uuid4().hex[:12]
@@ -113,6 +171,14 @@ def _build_instructions() -> str:
         "- entity_graph — co-occurrence graph: NPMI neighbors, topic communities, bridge entities\n"
         "- keyword_graph — keyword/tag co-occurrence: NPMI neighbors, topic clusters, bridge terms\n"
         "- reset_session — call after context compaction so fetched chunks regain full relevance\n"
+        "\n"
+        "Wiki tools (synthesized knowledge pages):\n"
+        "- wiki_search(query) — search wiki pages for concepts, entities, or topics\n"
+        "- wiki_get_page(page_id) — read a full wiki page with claims and provenance\n"
+        "- wiki_generate_page(page_type, target) — generate or refresh a page on demand\n"
+        "- wiki_related(page_id) — browse connections between wiki pages\n"
+        "- wiki_claims(page_id) — inspect claim-level provenance without full page\n"
+        "- wiki_queue() — list stale or missing pages\n"
         "\n"
         "Avoid: long multi-sentence queries, "
         "fetching many chunks at once, search_deep for simple lookups."
@@ -749,8 +815,13 @@ def _register_tools(mcp: FastMCP) -> None:
                     chunks = await asyncio.to_thread(ingester.ingest_file, path=source, **kwargs)
 
                 with _ingest_jobs_lock:
-                    _ingest_jobs[job_id]["status"] = "done"
                     _ingest_jobs[job_id]["chunks"] = chunks
+                    _ingest_jobs[job_id]["message"] = f"Ingested {chunks} chunks, generating wiki pages…"
+
+                await asyncio.to_thread(_post_ingest_wiki, name)
+
+                with _ingest_jobs_lock:
+                    _ingest_jobs[job_id]["status"] = "done"
                     _ingest_jobs[job_id]["message"] = f"Ingested {chunks} chunks"
 
             except Exception as e:
@@ -1075,6 +1146,293 @@ def _register_tools(mcp: FastMCP) -> None:
                 return {"success": True, "term": term, "community_members": members}
 
             return {"success": False, "error": f"Unknown mode: {mode}"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_search ────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def wiki_search(
+        query: Annotated[str, Field(description="Search query for wiki pages.")],
+        page_type: Annotated[str | None, Field(default=None, description="Filter by page type: entity, concept, source, comparison.")] = None,
+        n_results: Annotated[int, Field(default=8, ge=1, le=30, description="Number of results.")] = 8,
+        include_stale: Annotated[bool, Field(default=False, description="Include stale pages in results.")] = False,
+    ) -> dict:
+        """Search wiki pages for synthesized knowledge.
+
+        WHEN TO USE: When you want a synthesized overview of a concept,
+        entity, or topic rather than raw source chunks. Wiki pages
+        aggregate and verify claims across multiple sources.
+
+        Returns compact results with page_id, title, page_type,
+        confidence, corroboration, and a text preview.
+        """
+        from ..core.wiki_index import search_wiki
+
+        try:
+            results = search_wiki(
+                query=query,
+                page_type=page_type,
+                n_results=n_results,
+                include_stale=include_stale,
+            )
+            return {
+                "success": True,
+                "total": len(results),
+                "results": results,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_get_page ──────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def wiki_get_page(
+        page_id: Annotated[str | None, Field(default=None, description="Page ID like 'concept/deception' or 'entity/sun-tzu'.")] = None,
+        slug: Annotated[str | None, Field(default=None, description="Page slug to search for across page types.")] = None,
+        include_claims: Annotated[bool, Field(default=True, description="Include structured claim data.")] = True,
+        include_provenance: Annotated[bool, Field(default=True, description="Include full provenance chunk IDs.")] = True,
+    ) -> dict:
+        """Read a wiki page — synthesized knowledge with claim-level provenance.
+
+        WHEN TO USE: After wiki_search finds a relevant page, use this to
+        read the full content with claims, verification status, and source
+        chunk IDs. Each claim is tagged supported/partially_supported/review/conflicted.
+
+        Provide either page_id (exact) or slug (searches all page types).
+        """
+        from ..core.wiki import get_wiki_manager
+
+        try:
+            wm = get_wiki_manager()
+
+            if not page_id and slug:
+                for ptype in ("concept", "entity", "source", "comparison"):
+                    candidate = f"{ptype}/{slug}"
+                    if wm.page_exists(candidate):
+                        page_id = candidate
+                        break
+
+            if not page_id:
+                return {"success": False, "error": "Provide page_id or slug"}
+
+            page = wm.get_page(page_id)
+            if not page:
+                return {"success": False, "error": f"Page not found: {page_id}"}
+
+            result = {
+                "success": True,
+                "page_id": page.page_id,
+                "page_type": page.page_type,
+                "title": page.title,
+                "status": page.status,
+                "version": page.version,
+                "source_collections": page.source_collections,
+                "source_chunk_count": page.source_chunk_count,
+                "supporting_source_count": page.supporting_source_count,
+                "corroboration_level": page.corroboration_level,
+                "confidence": page.confidence,
+                "related_pages": page.related_pages,
+                "content": page.content,
+                "backlinks": wm.get_backlinks(page_id),
+            }
+
+            if include_claims and page.generation:
+                result["claims"] = page.generation.get("claims", [])
+                result["claim_count"] = page.generation.get("claim_count", 0)
+
+            if include_provenance and page.generation:
+                result["generation_strategy"] = page.generation.get("strategy", "")
+                result["inputs_hash"] = page.generation.get("inputs_hash", "")
+                claims = page.generation.get("claims", [])
+                chunk_ids = []
+                for c in claims:
+                    chunk_ids.extend(c.get("chunk_ids", []))
+                result["provenance_chunk_ids"] = sorted(set(chunk_ids))
+
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_generate_page ─────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def wiki_generate_page(
+        page_type: Annotated[str, Field(description="Page type: entity, concept, or source.")],
+        target: Annotated[str, Field(description="Entity name, concept tag, or collection name to generate a page for.")],
+        force: Annotated[bool, Field(default=False, description="Force regeneration even if page exists and is not stale.")] = False,
+    ) -> dict:
+        """Generate or refresh a wiki page on demand.
+
+        WHEN TO USE: When a concept or entity deserves a synthesized
+        page but one doesn't exist yet, or when a page is stale.
+        Uses LLM pipeline: evidence selection → claim drafting →
+        claim verification → page synthesis.
+
+        PARAMETERS:
+        - page_type: 'entity', 'concept', or 'source'
+        - target: the name/tag to generate for (e.g., 'deception', 'Sun Tzu', 'Influence')
+        - force: regenerate even if current page is fresh
+        """
+        from ..core.wiki_generate import generate_entity_page, generate_concept_page
+        from ..core.wiki import get_wiki_manager
+
+        try:
+            if page_type == "entity":
+                page = generate_entity_page(target, force=force)
+            elif page_type == "concept":
+                page = generate_concept_page(target, force=force)
+            elif page_type == "source":
+                wm = get_wiki_manager()
+                count = wm.generate_source_pages(collection=target, force=force)
+                return {"success": True, "message": f"Generated/refreshed {count} source pages"}
+            else:
+                return {"success": False, "error": f"Unknown page_type: {page_type}. Use entity, concept, or source."}
+
+            if not page:
+                return {"success": False, "error": f"Not enough evidence to generate {page_type} page for '{target}'"}
+
+            return {
+                "success": True,
+                "page_id": page.page_id,
+                "title": page.title,
+                "claim_count": page.generation.get("claim_count", 0),
+                "corroboration_level": page.corroboration_level,
+                "confidence": page.confidence,
+                "source_collections": page.source_collections,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_related ───────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def wiki_related(
+        page_id: Annotated[str, Field(description="Page ID to find relations for.")],
+        relation: Annotated[str, Field(default="all", description="Relation type: all, concepts, entities, sources, backlinks.")] = "all",
+        n_results: Annotated[int, Field(default=10, ge=1, le=50, description="Max results.")] = 10,
+    ) -> dict:
+        """Browse the wiki graph — related pages, backlinks, connections.
+
+        WHEN TO USE: After reading a wiki page, explore what else
+        links to it or what it links to.
+        """
+        from ..core.wiki import get_wiki_manager
+
+        try:
+            wm = get_wiki_manager()
+            page = wm.get_page(page_id)
+            if not page:
+                return {"success": False, "error": f"Page not found: {page_id}"}
+
+            result = {"success": True, "page_id": page_id}
+
+            if relation in ("all", "backlinks"):
+                result["backlinks"] = wm.get_backlinks(page_id)
+
+            related = page.related_pages or []
+            if relation == "all":
+                result["related_pages"] = related[:n_results]
+            elif relation == "concepts":
+                result["related_pages"] = [r for r in related if r.startswith("concept/")][:n_results]
+            elif relation == "entities":
+                result["related_pages"] = [r for r in related if r.startswith("entity/")][:n_results]
+            elif relation == "sources":
+                result["related_pages"] = [r for r in related if r.startswith("source/")][:n_results]
+
+            return result
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_claims ────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def wiki_claims(
+        page_id: Annotated[str, Field(description="Page ID to inspect claims for.")],
+        min_support: Annotated[int, Field(default=1, ge=0, description="Minimum support count to include.")] = 1,
+        status_filter: Annotated[str | None, Field(default=None, description="Filter by status: supported, partially_supported, review, conflicted.")] = None,
+        n_results: Annotated[int, Field(default=20, ge=1, le=100, description="Max claims to return.")] = 20,
+    ) -> dict:
+        """Inspect claim-level provenance without reading the full page.
+
+        WHEN TO USE: When you need to verify what evidence supports
+        specific claims, or find which claims need review.
+        Each claim includes chunk_ids, collections, support count,
+        verification status, and corroboration level.
+        """
+        from ..core.wiki import get_wiki_manager
+
+        try:
+            wm = get_wiki_manager()
+            page = wm.get_page(page_id)
+            if not page:
+                return {"success": False, "error": f"Page not found: {page_id}"}
+
+            claims = page.generation.get("claims", []) if page.generation else []
+
+            if status_filter:
+                claims = [c for c in claims if c.get("status") == status_filter]
+            if min_support > 0:
+                claims = [c for c in claims if c.get("support_count", 0) >= min_support]
+
+            claims = claims[:n_results]
+
+            by_status = {}
+            all_claims = page.generation.get("claims", []) if page.generation else []
+            for c in all_claims:
+                s = c.get("status", "unknown")
+                by_status[s] = by_status.get(s, 0) + 1
+
+            return {
+                "success": True,
+                "page_id": page_id,
+                "total_claims": len(all_claims),
+                "status_summary": by_status,
+                "returned": len(claims),
+                "claims": claims,
+            }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_queue ─────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def wiki_queue(
+        action: Annotated[str, Field(default="list", description="Action: list (show stale/missing), rebuild_index (reindex all pages), stats.")] = "list",
+        limit: Annotated[int, Field(default=20, ge=1, le=100, description="Max items to return.")] = 20,
+    ) -> dict:
+        """Manage wiki page queue — stale pages, rebuild index, stats.
+
+        WHEN TO USE: To check wiki health, find pages needing refresh,
+        or rebuild the search index after manual edits.
+
+        Actions:
+        - list: show stale pages that need regeneration
+        - rebuild_index: rebuild the LanceDB wiki search index from all pages
+        - stats: page counts by type and status
+        """
+        from ..core.wiki import get_wiki_manager
+
+        try:
+            wm = get_wiki_manager()
+
+            if action == "stats":
+                return {"success": True, **wm.stats()}
+
+            if action == "rebuild_index":
+                from ..core.wiki_index import rebuild_index
+                count = rebuild_index()
+                return {"success": True, "message": f"Rebuilt wiki index: {count} fragments indexed"}
+
+            if action == "list":
+                stale = wm.get_stale_pages()
+                return {
+                    "success": True,
+                    "stale_count": len(stale),
+                    "stale_pages": stale[:limit],
+                }
+
+            return {"success": False, "error": f"Unknown action: {action}. Use list, rebuild_index, or stats."}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

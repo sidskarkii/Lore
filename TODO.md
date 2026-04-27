@@ -7,25 +7,25 @@
 - [ ] Test suite — proper pytest tests, not ad-hoc scripts. Cover: search, entity index, enrichment, ingest, MCP tools
 
 ## Cross-Source Connections (Codex-reviewed design)
-- [ ] **KeywordTagGraph** — sibling to EntityGraph, NPMI on keywords+concept_tags, namespaced nodes (kw:X, tag:Y), Louvain communities, persisted to keyword_graph.json. Share generic co-occurrence helpers with EntityGraph.
-- [ ] **Jaccard similarity index** — precomputed chunk-to-chunk on keyword+tag sets, JSON file (chunk_id → top-N related chunks with jaccard score, shared terms, collection). Rebuild after ingest.
-- [ ] **Fused find_related** — weighted scoring: 0.5*entity_overlap + 0.3*jaccard + 0.2*keyword/tag overlap. Returns shared_entities, shared_keywords, shared_tags, jaccard score.
+- [x] **KeywordTagGraph** — sibling to EntityGraph, NPMI on keywords+concept_tags, namespaced nodes (kw:X, tag:Y), Louvain communities, persisted to keyword_graph.json
+- [x] **Jaccard similarity index** — precomputed chunk-to-chunk on keyword+tag sets, JSON file
+- [x] **Fused find_related** — weighted scoring: entity_overlap + jaccard + keyword/tag overlap
 - [ ] BERTopic — deferred (concept_tags + NPMI + Louvain already sufficient, avoids umap/hdbscan deps)
 
 ## Wiki Layer (Karpathy LLM Wiki pattern)
 
-### MVP — build now
-- [ ] **Infrastructure** — ~/.lore/wiki/ directory layout, page schema with YAML frontmatter, pages.json manifest, backlinks.json
-- [ ] **Source pages** — thin wiki wrapper around existing book_summary.json, no new LLM calls
-- [ ] **Entity pages** — one per canonical EntityIndex cluster (threshold: 2+ chunks or 2+ collections or bridge node). Haiku distills evidence, sonnet synthesizes cross-source.
-- [ ] **Concept pages** — one per recurring concept_tag/keyword cluster (threshold: 3+ chunks or 2+ sources). Haiku distills, sonnet synthesizes. Highest-value page type.
-- [ ] **Evidence selection** — deterministic candidate selectors using CrossSourceIndex postings, EntityGraph neighbors, KeywordTagGraph communities. Cap 12-30 chunks per page.
-- [ ] **Claim-level provenance** — each claim stores chunk_ids + source count. Corroboration: low/moderate/high/mixed.
-- [ ] **Cross-references** — page→page, page→source, page→chunks. Backlinks manifest.
-- [ ] **Wiki search** — separate LanceDB wiki_pages table, page fragments indexed, blended with chunk search. Result type identifies chunk vs wiki.
-- [ ] **Dirty-page invalidation** — ingest/delete marks affected pages stale, full regenerate on next access
-- [ ] **MCP tools** — wiki_search, wiki_get_page, wiki_generate_page, wiki_related, wiki_claims, wiki_queue
-- [ ] **Hybrid triggers** — auto-generate source page + top 10 concepts/entities after ingest, rest on-demand
+### MVP — done
+- [x] **Infrastructure** — ~/.lore/wiki/ directory layout, page schema with YAML frontmatter, pages.json manifest, backlinks.json
+- [x] **Source pages** — thin wiki wrapper around existing book_summary.json, no new LLM calls
+- [x] **Entity pages** — one per canonical EntityIndex cluster. Haiku distills evidence, sonnet synthesizes cross-source.
+- [x] **Concept pages** — one per recurring concept_tag/keyword cluster. Haiku distills, sonnet synthesizes.
+- [x] **Evidence selection** — deterministic candidate selectors using CrossSourceIndex postings, EntityGraph neighbors, KeywordTagGraph communities
+- [x] **Claim-level provenance** — each claim stores chunk_ids + source count. Corroboration: low/moderate/high/mixed.
+- [x] **Cross-references** — page→page, page→source, page→chunks. Backlinks manifest.
+- [x] **Wiki search** — separate LanceDB wiki_pages table, page fragments indexed, hybrid vector + FTS with RRF fusion
+- [x] **Dirty-page invalidation** — ingest/delete marks affected pages stale via collection-aware propagation
+- [x] **MCP tools** — wiki_search, wiki_get_page, wiki_generate_page, wiki_related, wiki_claims, wiki_queue (20 tools total)
+- [x] **Hybrid triggers** — auto-generate source page + top 10 concepts/entities after ingest, rest on-demand
 
 ### Phase 2 — after MVP
 - [ ] **Comparison pages** — on-demand synthesis comparing 2-5 sources on a concept/entity
@@ -39,15 +39,23 @@
 - [ ] **Demand-driven generation** — search query signals trigger page creation for popular topics
 - [ ] **Fine-grained trust scoring** — learned from user interaction patterns
 
-## Session Intelligence
+## Agent Feedback Loop (replaces rate_result)
+Design: session-level implicit telemetry + explicit `cite` signal. Log passively, materialize scores lazily, boost ranking gently.
+- [ ] **Session event log** — append-only SQLite: every search, get_context, wiki_get_page, search_deep logged with session_id + timestamp
+- [ ] **`cite` tool** — replaces rate_result. Agent passes list of chunk_ids it used in its answer. Low friction, positive-only signal.
+- [ ] **`mark_gap` tool** — agent signals "I needed X and it doesn't exist." Feeds ingest priority queue + wiki page candidates.
+- [ ] **Implicit signal extraction** — open_rate (opened/shown), abandon_rate (opened then re-queried), search_deep fallback rate per query pattern
+- [ ] **Materialized chunk scores** — background/lazy job computes per-chunk priors: citation_count, open_rate, co_citation pairs
+- [ ] **Ranking integration** — small RRF boost from historical citation count as tiebreaker
+- [ ] **Wiki auto-suggest** — topics with 3+ search_deep calls across sessions become wiki page candidates
+- [ ] **Enrichment feedback** — flag chunks needing re-chunking when many opens cluster on adjacent chunks
+
+### Session Intelligence (future)
 - [ ] "Related" section in search results — Rocchio + MMR recommendations, labeled with WHY
 - [ ] Implicit feedback via Rocchio + MMR — centroid of fetched-chunk embeddings, MMR for diversity
-- [ ] Future: chunk co-occurrence patterns from session logs
-- [ ] Weight long sessions higher for learning
+- [ ] Co-citation model — chunks frequently cited together get evidence selection priority
 - [ ] Critical mass detection — auto-enable RL pipeline at threshold
 - [ ] Upgrade to Thompson Sampling — stochastic exploration for uncertain chunks
-- [ ] Rating persistence across sessions (SQLite survives restarts)
-- [ ] Self-improving pipeline — co-occurrence model, sequence patterns, query-chunk affinity
 
 ## Enrichment
 - [ ] Always chunked output — consistent 5000 tok passes

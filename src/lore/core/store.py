@@ -129,7 +129,7 @@ def _schema(dim: int) -> pa.Schema:
     ])
 
 
-def _invalidate_derived_indexes():
+def _invalidate_derived_indexes(collection: str = ""):
     """Clear all cached derived indexes so they rebuild on next access."""
     from .entities import invalidate_entity_index
     from .graph import invalidate_entity_graph, invalidate_keyword_graph
@@ -140,6 +140,25 @@ def _invalidate_derived_indexes():
     invalidate_keyword_graph()
     invalidate_jaccard_index()
     invalidate_cross_index()
+    _invalidate_wiki_pages(collection)
+
+
+def _invalidate_wiki_pages(collection: str):
+    """Mark wiki pages stale if they reference the changed collection."""
+    if not collection:
+        return
+    try:
+        from .wiki import get_wiki_manager
+        wm = get_wiki_manager()
+        stale_ids = [
+            p["page_id"] for p in wm.list_pages()
+            if collection in p.get("source_collections", [])
+        ]
+        if stale_ids:
+            wm.mark_stale(stale_ids, reason=f"collection '{collection}' changed")
+            print(f"  [wiki] Marked {len(stale_ids)} pages stale after {collection} change")
+    except Exception:
+        pass
 
 
 _store_instance: "Store | None" = None
@@ -277,7 +296,7 @@ class Store:
         # Refresh table handle after optimize — it deletes old fragment files and
         # the cached reference would point to stale paths on next access
         self._table = self._db.open_table(self._table_name)
-        _invalidate_derived_indexes()
+        _invalidate_derived_indexes(collection=meta["collection"])
         return len(rows)
 
     def _rebuild_fts(self, tbl):
@@ -307,7 +326,7 @@ class Store:
         tbl = self._get_or_create_table()
         tbl.delete(f"collection = '{_esc(collection)}'")
         self._optimize(tbl)
-        _invalidate_derived_indexes()
+        _invalidate_derived_indexes(collection=collection)
 
     def delete_episode(self, collection: str, episode_num: int):
         """Remove chunks for a specific episode."""
@@ -316,7 +335,7 @@ class Store:
             f"collection = '{_esc(collection)}' AND episode_num = {episode_num}"
         )
         self._optimize(tbl)
-        _invalidate_derived_indexes()
+        _invalidate_derived_indexes(collection=collection)
 
     # ── Read ──────────────────────────────────────────────────────────
 

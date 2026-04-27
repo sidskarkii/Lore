@@ -201,6 +201,14 @@ class WikiManager:
         self._save_manifest()
         self.clear_stale(page.page_id)
         self._update_backlinks_for(page)
+        self._index_page(page)
+
+    def _index_page(self, page: WikiPage):
+        try:
+            from .wiki_index import index_page
+            index_page(page)
+        except Exception:
+            pass
 
     def delete_page(self, page_id: str) -> bool:
         path = self._page_path(page_id)
@@ -215,6 +223,11 @@ class WikiManager:
             del dirty[page_id]
             self._save_dirty_queue(dirty)
         self._remove_backlinks_for(page_id)
+        try:
+            from .wiki_index import remove_page
+            remove_page(page_id)
+        except Exception:
+            pass
         return existed
 
     # ── List/Query ──────────────────────────────────────────────
@@ -323,9 +336,10 @@ class WikiManager:
 
     # ── Source Page Adapter ──────────────────────────────────────
 
-    def generate_source_pages(self, force: bool = False) -> int:
+    def generate_source_pages(self, collection: str | None = None, force: bool = False) -> int:
         """Convert existing book_summary.json archives into wiki source pages.
         No LLM calls — pure reformatting of existing data.
+        Set collection to limit to a single collection name.
         Set force=True to regenerate existing pages from updated archives.
         """
         archive_dir = self._cfg.archive_dir
@@ -336,6 +350,10 @@ class WikiManager:
         for coll_dir in sorted(archive_dir.iterdir()):
             if not coll_dir.is_dir():
                 continue
+            if collection and coll_dir.name != collection:
+                display_check = coll_dir.name.replace("_", " ")
+                if display_check.lower() != collection.lower():
+                    continue
             summary_file = coll_dir / "book_summary.json"
             meta_file = coll_dir / "meta.json"
             if not summary_file.exists():
@@ -347,13 +365,15 @@ class WikiManager:
             except (json.JSONDecodeError, OSError):
                 continue
 
-            collection = coll_dir.name
-            display = meta.get("collection_display", collection.replace("_", " "))
+            coll_name = coll_dir.name
+            display = meta.get("collection_display", coll_name.replace("_", " "))
             slug = _slug(display)
             page_id = f"source/{slug}"
 
             if not force and self.page_exists(page_id):
-                continue
+                meta_entry = self._manifest.get(page_id, {})
+                if meta_entry.get("status") != "stale":
+                    continue
 
             overview = summary.get("overview", "")
             themes = summary.get("main_themes", [])
@@ -441,7 +461,7 @@ class WikiManager:
                 title=display,
                 slug=slug,
                 version=version,
-                source_collections=[collection],
+                source_collections=[coll_name],
                 source_chunk_count=meta.get("chunk_count", 0),
                 supporting_source_count=1,
                 corroboration_level="single_source",
@@ -450,9 +470,9 @@ class WikiManager:
                     "strategy": "archive_adapter",
                     "model": "none",
                     "inputs_hash": archive_hash,
-                    "source_versions": {collection: archive_hash},
+                    "source_versions": {coll_name: archive_hash},
                 },
-                canonical_sources=[{"collection": collection, "weight": "primary"}],
+                canonical_sources=[{"collection": coll_name, "weight": "primary"}],
                 related_pages=related,
                 content="\n".join(sections),
             )
