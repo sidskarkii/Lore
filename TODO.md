@@ -28,16 +28,21 @@
 
 ### Phase 2
 - [x] **Comparison pages** — on-demand synthesis comparing 2-4 sources on a topic. 4-stage pipeline: evidence selection (search + postings per collection) → per-source distillation (haiku) → cross-source comparison (sonnet) → page synthesis (sonnet). Collection filter added to search().
-- [ ] **Lint/audit tool** — periodic health check for orphan pages, contradictions, gaps
+- [ ] **Lint/audit tool** — contradiction detection, orphan pages, stale claims, weakly supported claims, missing backlinks, source-gap suggestions. Biggest failure mode protection. (Karpathy emphasizes this explicitly.)
 - [ ] **Search ranking heuristics** — query intent detection to route wiki vs chunks. "compare/differ/vs" → boost comparison pages, "what is/explain" → boost concept pages, "exact quote/page number" → suppress wiki, boost raw chunks. Simple keyword matching covers 80%.
 - [ ] **Claims-only mode on wiki_get_page** — `include_content=False` to skip prose and return just structured claims. Concept/entity pages are most useful to agents as claim indexes, not prose. Cuts response tokens in half.
 - [ ] **Comparison preview** — lightweight `wiki_compare_preview(topic, collections)` that runs evidence selection only (no LLM) and returns chunk overlap stats. Lets agents decide if a full comparison is worth the cost before committing 4 LLM calls.
+- [ ] **Ingest compounding** — when a source is ingested, proactively update existing entity/concept pages that reference overlapping entities/tags, not just mark stale. Karpathy: "a single source typically touches 10-15 wiki pages."
+- [ ] **Q&A → wiki filing** — mechanism for agent answers to be filed back as new wiki pages so explorations compound the knowledge base. Core Karpathy compounding pattern.
+- [ ] **Typed relationships** — claim/page-level semantic relations: supports, contradicts, supersedes, extends. Current backlinks only say "connected", not how. Step toward LLM Wiki v2.
+- [ ] **Activity log** — append-only log.md or SQLite equivalent recording all ingests, wiki generations, queries. Karpathy's log.md pattern. Overlaps with session event log in feedback loop.
 
 ### Phase 3 — scale
 - [ ] **Recursive wiki generation** — autonomous "discover and write all missing pages"
 - [ ] **Claim contradiction resolution** — multi-source disagreement detection and surfacing
-- [ ] **Page hierarchy** — parent-child taxonomies, community-based auto-grouping. Essential at scale (thousands of pages)
+- [ ] **Page hierarchy + index surfaces** — parent-child taxonomies, community-based auto-grouping, navigable index.md equivalent. Essential at scale (thousands of pages).
 - [ ] **Demand-driven generation** — part of feedback loop: session log signals trigger page creation for popular topics
+- [ ] **Wiki-maintenance schema** — single governance document (Layer 3) encoding ingest norms, update rules, consistency policies, page-writing conventions. Currently scattered across design docs.
 
 ## Agent Feedback Loop (replaces rate_result)
 Design: session-level implicit telemetry + explicit `cite` signal. Log passively, materialize scores lazily, boost ranking gently. Demand-driven wiki generation consumes these signals.
