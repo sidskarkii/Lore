@@ -66,11 +66,14 @@ def _extract_fragments(page) -> list[dict]:
     }
 
     _SECTION_PATTERNS = [
-        ("summary",   r'## (?:Summary|Overview)\s*\n(.*?)(?=\n## |\Z)'),
-        ("claims",    r'## Key Claims\s*\n(.*?)(?=\n## |\Z)'),
-        ("synthesis", r'## Cross-Source Synthesis\s*\n(.*?)(?=\n## |\Z)'),
-        ("themes",    r'## (?:Main Themes|Key Takeaways)\s*\n(.*?)(?=\n## |\Z)'),
-        ("sections",  r'## (?:Sections|Cross-Section Patterns)\s*\n(.*?)(?=\n## |\Z)'),
+        ("summary",      r'## (?:Summary|Overview)\s*\n(.*?)(?=\n## |\Z)'),
+        ("claims",       r'## Key Claims\s*\n(.*?)(?=\n## |\Z)'),
+        ("synthesis",    r'## (?:Cross-Source Synthesis|Synthesis)\s*\n(.*?)(?=\n## |\Z)'),
+        ("themes",       r'## (?:Main Themes|Key Takeaways)\s*\n(.*?)(?=\n## |\Z)'),
+        ("sections",     r'## (?:Sections|Cross-Section Patterns)\s*\n(.*?)(?=\n## |\Z)'),
+        ("agreements",   r'## Agreements\s*\n(.*?)(?=\n## |\Z)'),
+        ("tensions",     r'## Tensions & Disagreements\s*\n(.*?)(?=\n## |\Z)'),
+        ("positions",    r'## Per-Source Positions\s*\n(.*?)(?=\n## |\Z)'),
     ]
 
     for frag_type, pattern in _SECTION_PATTERNS:

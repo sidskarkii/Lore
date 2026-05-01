@@ -81,12 +81,14 @@ def _esc(val: str) -> str:
     return val.replace("'", "''")
 
 
-def _build_where(topic: str | None, subtopic: str | None) -> str | None:
+def _build_where(topic: str | None, subtopic: str | None, collection: str | None = None) -> str | None:
     parts = []
     if topic:
         parts.append(f"topic = '{_esc(topic.lower())}'")
     if subtopic:
         parts.append(f"subtopic = '{_esc(subtopic.lower())}'")
+    if collection:
+        parts.append(f"collection = '{_esc(collection)}'")
     return " AND ".join(parts) if parts else None
 
 
@@ -325,6 +327,7 @@ class SearchEngine:
         n_results: int = 5,
         topic: str | None = None,
         subtopic: str | None = None,
+        collection: str | None = None,
         expand: bool = True,
         session_id: str | None = None,
         _skip_expansion: bool = False,
@@ -333,7 +336,7 @@ class SearchEngine:
         cfg = self._cfg
         candidate_count = cfg.get("search.candidate_count", 30)
         rrf_k = cfg.get("search.rrf_k", 60)
-        where = _build_where(topic, subtopic)
+        where = _build_where(topic, subtopic, collection)
         use_expansion = _force_expansion or (cfg.get("search.query_expansion", False) and not _skip_expansion)
 
         t0 = time.perf_counter()

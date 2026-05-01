@@ -17,7 +17,7 @@ Tools (20):
     delete_collection  — remove a collection
     wiki_search        — search wiki pages (vector + FTS)
     wiki_get_page      — read a wiki page by ID or slug
-    wiki_generate_page — generate or refresh a wiki page
+    wiki_generate_page — generate or refresh a wiki page (incl. comparison)
     wiki_related       — browse wiki page connections
     wiki_claims        — inspect claim-level provenance
     wiki_queue         — manage stale/missing pages
@@ -175,7 +175,7 @@ def _build_instructions() -> str:
         "Wiki tools (synthesized knowledge pages):\n"
         "- wiki_search(query) — search wiki pages for concepts, entities, or topics\n"
         "- wiki_get_page(page_id) — read a full wiki page with claims and provenance\n"
-        "- wiki_generate_page(page_type, target) — generate or refresh a page on demand\n"
+        "- wiki_generate_page(page_type, target, collections?) — generate/refresh a page; for comparison pages pass collections=[...]\n"
         "- wiki_related(page_id) — browse connections between wiki pages\n"
         "- wiki_claims(page_id) — inspect claim-level provenance without full page\n"
         "- wiki_queue() — list stale or missing pages\n"
@@ -1258,23 +1258,25 @@ def _register_tools(mcp: FastMCP) -> None:
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
     def wiki_generate_page(
-        page_type: Annotated[str, Field(description="Page type: entity, concept, or source.")],
-        target: Annotated[str, Field(description="Entity name, concept tag, or collection name to generate a page for.")],
+        page_type: Annotated[str, Field(description="Page type: entity, concept, source, or comparison.")],
+        target: Annotated[str, Field(description="Entity name, concept tag, collection name, or comparison topic.")],
+        collections: Annotated[list[str] | None, Field(default=None, description="For comparison pages: list of 2-4 collection names to compare.")] = None,
         force: Annotated[bool, Field(default=False, description="Force regeneration even if page exists and is not stale.")] = False,
     ) -> dict:
         """Generate or refresh a wiki page on demand.
 
         WHEN TO USE: When a concept or entity deserves a synthesized
         page but one doesn't exist yet, or when a page is stale.
-        Uses LLM pipeline: evidence selection → claim drafting →
-        claim verification → page synthesis.
+        For comparisons, use page_type='comparison' with target as the
+        topic and collections as the sources to compare.
 
         PARAMETERS:
-        - page_type: 'entity', 'concept', or 'source'
-        - target: the name/tag to generate for (e.g., 'deception', 'Sun Tzu', 'Influence')
+        - page_type: 'entity', 'concept', 'source', or 'comparison'
+        - target: the name/tag/topic to generate for
+        - collections: required for comparison — 2-4 collection names
         - force: regenerate even if current page is fresh
         """
-        from ..core.wiki_generate import generate_entity_page, generate_concept_page
+        from ..core.wiki_generate import generate_entity_page, generate_concept_page, generate_comparison_page
         from ..core.wiki import get_wiki_manager
 
         try:
@@ -1286,13 +1288,17 @@ def _register_tools(mcp: FastMCP) -> None:
                 wm = get_wiki_manager()
                 count = wm.generate_source_pages(collection=target, force=force)
                 return {"success": True, "message": f"Generated/refreshed {count} source pages"}
+            elif page_type == "comparison":
+                if not collections or len(collections) < 2:
+                    return {"success": False, "error": "Comparison requires 'collections' with 2-4 collection names."}
+                page = generate_comparison_page(target, collections, force=force)
             else:
-                return {"success": False, "error": f"Unknown page_type: {page_type}. Use entity, concept, or source."}
+                return {"success": False, "error": f"Unknown page_type: {page_type}. Use entity, concept, source, or comparison."}
 
             if not page:
                 return {"success": False, "error": f"Not enough evidence to generate {page_type} page for '{target}'"}
 
-            return {
+            result = {
                 "success": True,
                 "page_id": page.page_id,
                 "title": page.title,
@@ -1301,6 +1307,11 @@ def _register_tools(mcp: FastMCP) -> None:
                 "confidence": page.confidence,
                 "source_collections": page.source_collections,
             }
+            dropped = page.generation.get("dropped_collections", [])
+            if dropped:
+                result["dropped_collections"] = dropped
+                result["note"] = f"Collections excluded (insufficient evidence on '{target}'): {', '.join(dropped)}"
+            return result
         except Exception as e:
             return {"success": False, "error": str(e)}
 

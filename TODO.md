@@ -10,7 +10,6 @@
 - [x] **KeywordTagGraph** — sibling to EntityGraph, NPMI on keywords+concept_tags, namespaced nodes (kw:X, tag:Y), Louvain communities, persisted to keyword_graph.json
 - [x] **Jaccard similarity index** — precomputed chunk-to-chunk on keyword+tag sets, JSON file
 - [x] **Fused find_related** — weighted scoring: entity_overlap + jaccard + keyword/tag overlap
-- [ ] BERTopic — deferred (concept_tags + NPMI + Louvain already sufficient, avoids umap/hdbscan deps)
 
 ## Wiki Layer (Karpathy LLM Wiki pattern)
 
@@ -27,20 +26,21 @@
 - [x] **MCP tools** — wiki_search, wiki_get_page, wiki_generate_page, wiki_related, wiki_claims, wiki_queue (20 tools total)
 - [x] **Hybrid triggers** — auto-generate source page + top 10 concepts/entities after ingest, rest on-demand
 
-### Phase 2 — after MVP
-- [ ] **Comparison pages** — on-demand synthesis comparing 2-5 sources on a concept/entity
+### Phase 2
+- [x] **Comparison pages** — on-demand synthesis comparing 2-4 sources on a topic. 4-stage pipeline: evidence selection (search + postings per collection) → per-source distillation (haiku) → cross-source comparison (sonnet) → page synthesis (sonnet). Collection filter added to search().
 - [ ] **Lint/audit tool** — periodic health check for orphan pages, contradictions, gaps
-- [ ] **Search ranking heuristics** — boost wiki for conceptual queries, penalize for exact-quote queries
+- [ ] **Search ranking heuristics** — query intent detection to route wiki vs chunks. "compare/differ/vs" → boost comparison pages, "what is/explain" → boost concept pages, "exact quote/page number" → suppress wiki, boost raw chunks. Simple keyword matching covers 80%.
+- [ ] **Claims-only mode on wiki_get_page** — `include_content=False` to skip prose and return just structured claims. Concept/entity pages are most useful to agents as claim indexes, not prose. Cuts response tokens in half.
+- [ ] **Comparison preview** — lightweight `wiki_compare_preview(topic, collections)` that runs evidence selection only (no LLM) and returns chunk overlap stats. Lets agents decide if a full comparison is worth the cost before committing 4 LLM calls.
 
-### Later — full vision
+### Phase 3 — scale
 - [ ] **Recursive wiki generation** — autonomous "discover and write all missing pages"
 - [ ] **Claim contradiction resolution** — multi-source disagreement detection and surfacing
-- [ ] **Page hierarchy** — parent-child taxonomies, community-based auto-grouping
-- [ ] **Demand-driven generation** — search query signals trigger page creation for popular topics
-- [ ] **Fine-grained trust scoring** — learned from user interaction patterns
+- [ ] **Page hierarchy** — parent-child taxonomies, community-based auto-grouping. Essential at scale (thousands of pages)
+- [ ] **Demand-driven generation** — part of feedback loop: session log signals trigger page creation for popular topics
 
 ## Agent Feedback Loop (replaces rate_result)
-Design: session-level implicit telemetry + explicit `cite` signal. Log passively, materialize scores lazily, boost ranking gently.
+Design: session-level implicit telemetry + explicit `cite` signal. Log passively, materialize scores lazily, boost ranking gently. Demand-driven wiki generation consumes these signals.
 - [ ] **Session event log** — append-only SQLite: every search, get_context, wiki_get_page, search_deep logged with session_id + timestamp
 - [ ] **`cite` tool** — replaces rate_result. Agent passes list of chunk_ids it used in its answer. Low friction, positive-only signal.
 - [ ] **`mark_gap` tool** — agent signals "I needed X and it doesn't exist." Feeds ingest priority queue + wiki page candidates.
@@ -49,17 +49,17 @@ Design: session-level implicit telemetry + explicit `cite` signal. Log passively
 - [ ] **Ranking integration** — small RRF boost from historical citation count as tiebreaker
 - [ ] **Wiki auto-suggest** — topics with 3+ search_deep calls across sessions become wiki page candidates
 - [ ] **Enrichment feedback** — flag chunks needing re-chunking when many opens cluster on adjacent chunks
+- [ ] **Critical mass detection** — auto-enable ranking boost once enough citation data accumulates, avoid polluting rankings with noisy small-sample data
 
 ### Session Intelligence (future)
 - [ ] "Related" section in search results — Rocchio + MMR recommendations, labeled with WHY
 - [ ] Implicit feedback via Rocchio + MMR — centroid of fetched-chunk embeddings, MMR for diversity
 - [ ] Co-citation model — chunks frequently cited together get evidence selection priority
-- [ ] Critical mass detection — auto-enable RL pipeline at threshold
 - [ ] Upgrade to Thompson Sampling — stochastic exploration for uncertain chunks
 
 ## Enrichment
 - [ ] Always chunked output — consistent 5000 tok passes
-- [ ] Same session/conversation thread across progressive passes
+- [ ] Conversation threading across stages — run stages 2-4 as a single LLM conversation so each stage builds on prior context, not independent calls
 - [ ] Multilingual NER model (spaCy en_core_web_sm is English-only)
 
 ## Model Routing
@@ -72,10 +72,6 @@ Design: session-level implicit telemetry + explicit `cite` signal. Log passively
 
 ## Extractors
 - [ ] PDF: fix code block fragmentation on blank lines within code
-
-## Provider & Configuration
-- [ ] Discoverable provider setup — `configure` MCP tool or first-run wizard
-- [ ] Support all OpenAI-compatible APIs (docs + validation)
 
 ## Code Intelligence
 - [ ] tree-sitter-language-pack for multi-language AST parsing
@@ -142,3 +138,4 @@ Design: session-level implicit telemetry + explicit `cite` signal. Log passively
 - [x] Claude CLI provider — zero-config LLM via host subscription (spawns claude subprocess, inherits OAuth token), auto-detected by registry, sequential execution, model selection (haiku/sonnet/opus)
 - [x] Zero-config enrichment — ClaudeProvider replaces MCP sampling plan. Fallback: Claude CLI -> CustomProvider -> skip LLM
 - [x] Per-stage model routing — haiku for stage 2 (chunk titles), sonnet for stages 3-4 (summaries). Configurable via enrichment.model_stage{2,3,4}
+- [x] Wiki Phase 3 — MCP tools (wiki_search, wiki_get_page, wiki_generate_page, wiki_related, wiki_claims, wiki_queue), LanceDB search index, staleness propagation, codex-reviewed

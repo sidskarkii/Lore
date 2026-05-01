@@ -815,3 +815,429 @@ def _get_entity_candidates(min_mentions: int = 2) -> list[tuple[str, int, int]]:
 
     candidates.sort(key=lambda x: (-x[2], -x[1]))
     return candidates
+
+
+# ── Comparison Pages ──────────────────────────────────────────
+
+_MIN_EVIDENCE_PER_COLLECTION = 2
+_MAX_EVIDENCE_PER_COLLECTION = 8
+_MAX_COMPARISON_COLLECTIONS = 4
+
+
+def select_evidence_for_comparison(
+    topic: str,
+    collections: list[str],
+    max_per_collection: int = _MAX_EVIDENCE_PER_COLLECTION,
+    min_per_collection: int = _MIN_EVIDENCE_PER_COLLECTION,
+) -> dict[str, list[EvidenceChunk]]:
+    """Select evidence per collection using semantic search + postings expansion."""
+    from .search import SearchEngine
+    from .cross_index import get_cross_index
+
+    engine = SearchEngine()
+    ci = get_cross_index()
+
+    evidence_by_coll: dict[str, list[EvidenceChunk]] = {}
+
+    for coll in collections:
+        results = engine.search(
+            query=topic,
+            n_results=max_per_collection * 2,
+            collection=coll,
+            expand=False,
+            _skip_expansion=True,
+        )
+
+        chunk_ids = {r["id"] for r in results if r.get("id")}
+
+        tag_key = f"tag:{topic.lower()}"
+        kw_key = f"kw:{topic.lower()}"
+        posting_ids = set()
+        posting_ids.update(ci.term_postings.get(tag_key, set()))
+        posting_ids.update(ci.term_postings.get(kw_key, set()))
+        for pid in posting_ids:
+            coll_meta = ci.by_chunk.get(pid)
+            if coll_meta and coll_meta.collection == coll:
+                chunk_ids.add(pid)
+
+        from .store import get_store
+        store = get_store()
+        chunks = []
+        for cid in chunk_ids:
+            chunk = store.get_chunk_by_id(cid)
+            if chunk:
+                chunks.append(_chunk_to_evidence(chunk))
+
+        chunks.sort(key=lambda e: (-e.importance, e.chunk_id))
+        chunks = chunks[:max_per_collection]
+
+        if len(chunks) >= min_per_collection:
+            evidence_by_coll[coll] = chunks
+
+    return evidence_by_coll
+
+
+_DISTILL_SYSTEM = """You are a knowledge analyst distilling one source's position on a topic.
+
+Given evidence chunks from a single source about a specific topic, extract:
+1. The source's key positions/claims on this topic
+2. Unique perspectives or frameworks the source offers
+3. Specific examples or evidence the source provides
+
+Output ONLY a JSON object:
+{
+  "positions": [
+    {
+      "text": "Clear statement of the source's position",
+      "chunk_ids": ["chunk_id_1", "chunk_id_2"],
+      "strength": "strong|moderate|mentioned"
+    }
+  ],
+  "unique_angle": "What makes this source's treatment distinctive (1-2 sentences)",
+  "coverage": "deep|moderate|shallow"
+}
+
+Rules:
+- Ground every position in specific chunk_ids
+- "strong" = central argument, "moderate" = discussed, "mentioned" = brief reference
+- Be faithful to what the source actually says, do not extrapolate"""
+
+
+def _distill_source_position(
+    topic: str,
+    collection: str,
+    evidence: list[EvidenceChunk],
+) -> dict | None:
+    """Distill a single source's position on a topic (haiku)."""
+    parts = [f"Distill {collection.replace('_', ' ')}'s position on '{topic}' from these chunks:\n"]
+    budget = _MAX_DRAFT_CHARS
+    for e in evidence:
+        header = f"--- chunk_id: {e.chunk_id} | section: {e.section_heading} ---"
+        text = e.text[:1500] if len(e.text) > 1500 else e.text
+        block = f"{header}\n{text}\n"
+        if budget - len(block) < 0:
+            break
+        parts.append(block)
+        budget -= len(block)
+
+    response = _llm_chat(
+        [{"role": "system", "content": _DISTILL_SYSTEM}, {"role": "user", "content": "\n".join(parts)}],
+        role="draft",
+    )
+
+    result = _extract_json(response)
+    if not isinstance(result, dict):
+        return None
+
+    valid_ids = {e.chunk_id for e in evidence}
+    for pos in result.get("positions", []):
+        pos["chunk_ids"] = [cid for cid in pos.get("chunk_ids", []) if cid in valid_ids]
+        pos["collection"] = collection
+    result["collection"] = collection
+
+    return result
+
+
+_COMPARE_SYSTEM = """You are a comparative analyst synthesizing multiple sources' positions on a topic.
+
+Given distilled positions from {n_sources} sources, produce a structured comparison.
+
+Output ONLY a JSON object:
+{{
+  "agreements": [
+    {{
+      "text": "Point where sources agree",
+      "sources": ["collection_a", "collection_b"],
+      "chunk_ids": ["id1", "id2"]
+    }}
+  ],
+  "tensions": [
+    {{
+      "text": "Point where sources disagree or differ",
+      "source_positions": {{
+        "collection_a": "Their position",
+        "collection_b": "Their contrasting position"
+      }},
+      "chunk_ids": ["id1", "id2"]
+    }}
+  ],
+  "unique_contributions": [
+    {{
+      "collection": "collection_a",
+      "text": "What this source uniquely adds",
+      "chunk_ids": ["id1"]
+    }}
+  ],
+  "synthesis": "2-3 sentence overall synthesis of how these sources relate on this topic"
+}}
+
+Rules:
+- Only include agreements where 2+ sources genuinely converge
+- Tensions should reflect real differences, not just different emphasis
+- Unique contributions = perspectives only one source offers
+- Include chunk_ids for every claim
+- If a section has no items, use an empty array — do not force balance"""
+
+
+_COMPARISON_SYNTH_SYSTEM = """You are a wiki page writer creating a comparison page for a knowledge base.
+
+Write a structured comparison page from analyzed source positions.
+
+Page structure:
+# {{title}}
+
+## Summary
+2-4 sentence overview of how these sources relate on this topic.
+
+## Per-Source Positions
+### {{Source A}}
+Key positions from this source, with chunk citations.
+### {{Source B}}
+Key positions from this source, with chunk citations.
+
+## Agreements
+Points where sources converge. If none, write "No significant agreements identified."
+
+## Tensions & Disagreements
+Points where sources differ. If none, write "No significant tensions identified."
+
+## Unique Contributions
+Perspectives that only one source offers.
+
+## Synthesis
+1-3 paragraphs synthesizing the overall picture across sources.
+
+## Provenance
+List all contributing chunk_ids.
+
+Rules:
+- Neutral, encyclopedic tone
+- Every claim references chunk_ids
+- Do not invent beyond what the analysis contains
+- Allow sparse sections — not every comparison has tensions or agreements"""
+
+
+def _compare_positions(
+    topic: str,
+    distilled: list[dict],
+) -> dict | None:
+    """Cross-source comparison from distilled positions (sonnet)."""
+    parts = [f"Compare these {len(distilled)} sources on '{topic}':\n"]
+    for d in distilled:
+        coll = d.get("collection", "unknown")
+        parts.append(f"\n## {coll.replace('_', ' ')}")
+        parts.append(f"Unique angle: {d.get('unique_angle', 'N/A')}")
+        parts.append(f"Coverage: {d.get('coverage', 'N/A')}")
+        parts.append("Positions:")
+        for pos in d.get("positions", []):
+            strength = pos.get("strength", "moderate")
+            parts.append(f"  [{strength}] {pos.get('text', '')}")
+            parts.append(f"    Chunks: {', '.join(pos.get('chunk_ids', []))}")
+
+    prompt = _COMPARE_SYSTEM.format(n_sources=len(distilled))
+    response = _llm_chat(
+        [{"role": "system", "content": prompt}, {"role": "user", "content": "\n".join(parts)}],
+        role="synthesize",
+    )
+
+    return _extract_json(response)
+
+
+def _synthesize_comparison(
+    topic: str,
+    collections: list[str],
+    distilled: list[dict],
+    comparison: dict,
+    related_pages: list[str],
+) -> str:
+    """Synthesize the final comparison page markdown (sonnet)."""
+    coll_display = " vs ".join(c.replace("_", " ") for c in collections)
+    title = f"{topic.replace('-', ' ').title()}: {coll_display}"
+
+    related_text = "\n".join(f"  - [[{rp}]]" for rp in related_pages) if related_pages else "  (none)"
+
+    user_prompt = f"""Write a comparison wiki page: "{title}"
+
+Per-source distillations:
+{json.dumps(distilled, indent=2)}
+
+Cross-source analysis:
+{json.dumps(comparison, indent=2)}
+
+Collections being compared: {', '.join(c.replace('_', ' ') for c in collections)}
+Related pages to link:
+{related_text}
+
+Write the complete page now."""
+
+    return _llm_chat(
+        [{"role": "system", "content": _COMPARISON_SYNTH_SYSTEM}, {"role": "user", "content": user_prompt}],
+        role="synthesize",
+    )
+
+
+def generate_comparison_page(
+    topic: str,
+    collections: list[str],
+    force: bool = False,
+    max_per_collection: int = _MAX_EVIDENCE_PER_COLLECTION,
+) -> WikiPage | None:
+    """Generate a comparison page across 2-4 collections on a topic.
+
+    Pipeline: evidence selection -> per-source distillation (haiku) ->
+    cross-source comparison (sonnet) -> page synthesis (sonnet).
+    """
+    collections = sorted(set(collections))
+    if len(collections) < 2:
+        print("  [wiki_gen] Comparison requires at least 2 unique collections")
+        return None
+    if len(collections) > _MAX_COMPARISON_COLLECTIONS:
+        print(f"  [wiki_gen] Capping comparison to {_MAX_COMPARISON_COLLECTIONS} collections")
+        collections = collections[:_MAX_COMPARISON_COLLECTIONS]
+    topic_slug = _slug(topic)
+    coll_slugs = "--".join(_slug(c.replace("_", " ")) for c in collections)
+    page_id = f"comparison/{topic_slug}--{coll_slugs}"
+
+    wm = get_wiki_manager()
+    if not force and wm.page_exists(page_id):
+        existing = wm.get_page(page_id)
+        if existing and existing.status != "stale":
+            print(f"  [wiki_gen] Comparison page already exists: {page_id}")
+            return existing
+
+    requested_collections = list(collections)
+    print(f"  [wiki_gen] Generating comparison: '{topic}' across {collections}")
+
+    # Stage 1: Evidence selection
+    evidence_by_coll = select_evidence_for_comparison(
+        topic, collections, max_per_collection=max_per_collection,
+    )
+
+    if len(evidence_by_coll) < 2:
+        participating = list(evidence_by_coll.keys())
+        print(f"  [wiki_gen] Only {len(participating)} collections have enough evidence, need 2+")
+        return None
+
+    collections = sorted(evidence_by_coll.keys())
+    dropped_collections = sorted(set(requested_collections) - set(collections))
+    if dropped_collections:
+        print(f"  [wiki_gen] Dropped (insufficient evidence): {dropped_collections}")
+    topic_slug = _slug(topic)
+    coll_slugs = "--".join(_slug(c.replace("_", " ")) for c in collections)
+    page_id = f"comparison/{topic_slug}--{coll_slugs}"
+
+    all_evidence = [e for evs in evidence_by_coll.values() for e in evs]
+    for coll, evs in evidence_by_coll.items():
+        print(f"  [wiki_gen]   {coll}: {len(evs)} chunks")
+
+    # Stage 2: Per-source distillation (haiku, one call per source)
+    distilled: list[dict] = []
+    for coll in collections:
+        d = _distill_source_position(topic, coll, evidence_by_coll[coll])
+        if d:
+            distilled.append(d)
+        else:
+            print(f"  [wiki_gen]   Distillation failed for {coll}, skipping")
+
+    if len(distilled) < 2:
+        print(f"  [wiki_gen] Only {len(distilled)} sources distilled, need 2+")
+        return None
+
+    print(f"  [wiki_gen] Distilled {len(distilled)} source positions")
+
+    # Stage 3: Cross-source comparison (sonnet)
+    comparison = _compare_positions(topic, distilled)
+    if not comparison:
+        print(f"  [wiki_gen] Cross-source comparison failed")
+        return None
+
+    n_agreements = len(comparison.get("agreements", []))
+    n_tensions = len(comparison.get("tensions", []))
+    n_unique = len(comparison.get("unique_contributions", []))
+    print(f"  [wiki_gen] Comparison: {n_agreements} agreements, {n_tensions} tensions, {n_unique} unique")
+
+    # Stage 4: Page synthesis (sonnet)
+    related = _find_related_pages(topic, "comparison", all_evidence)
+    for coll in collections:
+        source_page = f"source/{_slug(coll.replace('_', ' '))}"
+        if source_page not in related and wm.page_exists(source_page):
+            related.append(source_page)
+
+    content = _synthesize_comparison(topic, collections, distilled, comparison, related)
+
+    # Build claims from comparison analysis (validate chunk_ids against evidence)
+    valid_ids = {e.chunk_id for e in all_evidence}
+    claims: list[Claim] = []
+    claim_idx = 0
+    for a in comparison.get("agreements", []):
+        cids = [cid for cid in a.get("chunk_ids", []) if cid in valid_ids]
+        claims.append(Claim(
+            claim_id=f"claim-{claim_idx:03d}",
+            text=a.get("text", ""),
+            chunk_ids=cids,
+            collections=a.get("sources", []),
+            support_count=len(cids),
+            status="supported" if cids else "review",
+            corroboration="high" if cids and len(a.get("sources", [])) >= 2 else "moderate" if cids else "low",
+        ))
+        claim_idx += 1
+    for t in comparison.get("tensions", []):
+        cids = [cid for cid in t.get("chunk_ids", []) if cid in valid_ids]
+        claims.append(Claim(
+            claim_id=f"claim-{claim_idx:03d}",
+            text=t.get("text", ""),
+            chunk_ids=cids,
+            collections=list(t.get("source_positions", {}).keys()),
+            support_count=len(cids),
+            status="conflicted" if cids else "review",
+            corroboration="mixed" if cids else "low",
+        ))
+        claim_idx += 1
+    for u in comparison.get("unique_contributions", []):
+        cids = [cid for cid in u.get("chunk_ids", []) if cid in valid_ids]
+        claims.append(Claim(
+            claim_id=f"claim-{claim_idx:03d}",
+            text=u.get("text", ""),
+            chunk_ids=cids,
+            collections=[u.get("collection", "")],
+            support_count=len(cids),
+            status="supported" if cids else "review",
+            corroboration="low",
+        ))
+        claim_idx += 1
+
+    chunk_ids = sorted(set(e.chunk_id for e in all_evidence))
+    coll_display = " vs ".join(c.replace("_", " ") for c in collections)
+    title = f"{topic.replace('-', ' ').title()}: {coll_display}"
+
+    page = WikiPage(
+        page_id=page_id,
+        page_type="comparison",
+        title=title,
+        slug=f"{topic_slug}--{coll_slugs}",
+        version=(wm.get_page(page_id).version + 1) if wm.page_exists(page_id) else 1,
+        source_collections=collections,
+        source_chunk_count=len(chunk_ids),
+        supporting_source_count=len(collections),
+        corroboration_level=_page_corroboration(claims) if claims else "moderate",
+        confidence=_page_confidence(claims) if claims else "medium",
+        generation={
+            "strategy": "comparison",
+            "model_draft": _get_model("draft") or "default",
+            "model_synthesize": _get_model("synthesize") or "default",
+            "inputs_hash": _inputs_hash(chunk_ids),
+            "source_versions": {},
+            "claim_count": len(claims),
+            "claims": [c.to_dict() for c in claims],
+            "distilled_positions": distilled,
+            "requested_collections": requested_collections,
+            "dropped_collections": dropped_collections,
+        },
+        canonical_sources=[{"collection": c, "weight": "compared"} for c in collections],
+        related_pages=related,
+        content=content,
+    )
+
+    wm.save_page(page)
+    print(f"  [wiki_gen] Saved comparison page: {page_id} ({len(claims)} claims)")
+    return page

@@ -83,3 +83,4 @@ test_docs/
 .playwright/
 .pytest_cache/
 debug/
+.mcp.json
