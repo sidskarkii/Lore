@@ -1190,6 +1190,7 @@ def _register_tools(mcp: FastMCP) -> None:
     def wiki_get_page(
         page_id: Annotated[str | None, Field(default=None, description="Page ID like 'concept/deception' or 'entity/sun-tzu'.")] = None,
         slug: Annotated[str | None, Field(default=None, description="Page slug to search for across page types.")] = None,
+        include_content: Annotated[bool, Field(default=True, description="Include full prose content. Set False for claims-only mode (saves tokens).")] = True,
         include_claims: Annotated[bool, Field(default=True, description="Include structured claim data.")] = True,
         include_provenance: Annotated[bool, Field(default=True, description="Include full provenance chunk IDs.")] = True,
     ) -> dict:
@@ -1198,6 +1199,9 @@ def _register_tools(mcp: FastMCP) -> None:
         WHEN TO USE: After wiki_search finds a relevant page, use this to
         read the full content with claims, verification status, and source
         chunk IDs. Each claim is tagged supported/partially_supported/review/conflicted.
+
+        Set include_content=False for claims-only mode — returns structured
+        claims without prose, cutting response tokens roughly in half.
 
         Provide either page_id (exact) or slug (searches all page types).
         """
@@ -1233,9 +1237,11 @@ def _register_tools(mcp: FastMCP) -> None:
                 "corroboration_level": page.corroboration_level,
                 "confidence": page.confidence,
                 "related_pages": page.related_pages,
-                "content": page.content,
                 "backlinks": wm.get_backlinks(page_id),
             }
+
+            if include_content:
+                result["content"] = page.content
 
             if include_claims and page.generation:
                 result["claims"] = page.generation.get("claims", [])
