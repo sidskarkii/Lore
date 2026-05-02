@@ -1,6 +1,6 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (20):
+Tools (21):
     intro              — deep orientation: collections, summaries, health, workflows
     search             — hybrid search (vector + BM25 + reranking)
     search_deep        — multi-hop decomposition for complex queries
@@ -21,6 +21,7 @@ Tools (20):
     wiki_related       — browse wiki page connections
     wiki_claims        — inspect claim-level provenance
     wiki_queue         — manage stale/missing pages
+    wiki_lint          — audit wiki health (broken provenance, orphans, gaps)
 """
 
 from __future__ import annotations
@@ -1538,6 +1539,34 @@ def _register_tools(mcp: FastMCP) -> None:
                 }
 
             return {"success": False, "error": f"Unknown action: {action}. Use list, rebuild_index, or stats."}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_lint ──────────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def wiki_lint(
+        checks: Annotated[list[str] | None, Field(default=None, description="Checks to run. Default: all. Options: stale, orphan, weak_claims, claim_summary, broken_links, broken_provenance, generation_drift, source_gaps.")] = None,
+    ) -> dict:
+        """Audit wiki health — find broken provenance, orphan pages, weak claims, source gaps.
+
+        WHEN TO USE: After ingesting new content, after wiki generation,
+        or periodically to check wiki integrity. Returns findings grouped
+        by severity (error/warning/info).
+
+        Checks:
+        - stale: pages needing regeneration
+        - orphan: pages with no incoming links
+        - weak_claims: claims with review/conflicted status or low support
+        - claim_summary: distribution of claim verification statuses
+        - broken_links: related_pages pointing to nonexistent pages
+        - broken_provenance: claims referencing deleted chunks
+        - generation_drift: claim_count mismatches, empty content, missing metadata
+        - source_gaps: entities/concepts spanning multiple sources without wiki pages
+        """
+        try:
+            from ..core.wiki_lint import lint_wiki
+            return {"success": True, **lint_wiki(checks=checks)}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

@@ -28,7 +28,7 @@
 
 ### Phase 2
 - [x] **Comparison pages** — on-demand synthesis comparing 2-4 sources on a topic. 4-stage pipeline: evidence selection (search + postings per collection) → per-source distillation (haiku) → cross-source comparison (sonnet) → page synthesis (sonnet). Collection filter added to search().
-- [ ] **Lint/audit tool** — contradiction detection, orphan pages, stale claims, weakly supported claims, missing backlinks, source-gap suggestions. Biggest failure mode protection. (Karpathy emphasizes this explicitly.)
+- [x] **Lint/audit tool** — wiki_lint MCP tool (21 tools total). 8 modular checks: stale pages, orphans, weak/conflicted claims, claim summary, broken links, broken provenance, generation drift (count mismatches, empty content), source gaps (entity index + concept tag scan). Findings grouped by severity (error/warning/info).
 - [x] **Search ranking heuristics** — query_intent.py: keyword-based intent detection (comparison/conceptual/entity/quote/citation). wiki_search gets page-type score boosts, search emits wiki_hint when wiki-favorable and not chunk-favorable. False positive guards (e.g. "vs code"). Codex-reviewed x2.
 - [ ] **Claims-only mode on wiki_get_page** — `include_content=False` to skip prose and return just structured claims. Concept/entity pages are most useful to agents as claim indexes, not prose. Cuts response tokens in half.
 - [ ] **Comparison preview** — lightweight `wiki_compare_preview(topic, collections)` that runs evidence selection only (no LLM) and returns chunk overlap stats. Lets agents decide if a full comparison is worth the cost before committing 4 LLM calls.
