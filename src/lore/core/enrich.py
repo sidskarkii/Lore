@@ -338,8 +338,8 @@ Section summaries:
 # ── LLM call infrastructure ─────────────────────────────────────────
 
 _FALLBACK_MODELS = [
-    "nvidia/nemotron-3-super-120b-a12b:free",
-    "google/gemma-3-12b-it:free",
+    "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    "google/gemma-3-27b-it",
 ]
 
 

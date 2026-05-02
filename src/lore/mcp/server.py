@@ -932,7 +932,10 @@ def _register_tools(mcp: FastMCP) -> None:
 
                 def on_progress(p: IngestionProgress):
                     with _ingest_jobs_lock:
-                        _ingest_jobs[job_id]["message"] = f"{p.stage}: {p.message or ''}"
+                        detail = p.message or p.current_item or ""
+                        if p.total_items > 1:
+                            detail = f"[{p.completed_items + 1}/{p.total_items}] {detail}"
+                        _ingest_jobs[job_id]["message"] = f"{p.stage}: {detail}"
 
                 kwargs = dict(name=name, topic=topic, subtopic=subtopic, on_progress=on_progress)
 

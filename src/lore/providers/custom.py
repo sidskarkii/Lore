@@ -62,23 +62,32 @@ class CustomProvider(Provider):
             base_url=base_url,
             api_key=api_key or "none",
             max_retries=0,
-            timeout=httpx.Timeout(60.0, connect=10.0),
+            timeout=httpx.Timeout(120.0, connect=15.0),
         )
 
     def chat(self, messages: list[dict], model: str | None = None, max_tokens: int = 8192) -> str:
+        import time as _t
         client = self._get_client()
         _, _, default_model = self._get_config()
         model = model or default_model or "default"
-        print(f"  [custom] chat model={model}")
+        prompt_len = sum(len(m.get("content", "")) for m in messages)
+        print(f"  [llm] -> {model} ({prompt_len} chars, max_tokens={max_tokens})", flush=True)
+        t0 = _t.time()
         try:
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
             )
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            elapsed = _t.time() - t0
+            usage = getattr(response, "usage", None)
+            tok_info = f" in={usage.prompt_tokens} out={usage.completion_tokens}" if usage else ""
+            print(f"  [llm] <- {elapsed:.1f}s {len(content)} chars{tok_info}", flush=True)
+            return content
         except Exception as e:
-            print(f"  [custom] chat ERROR: {e}")
+            elapsed = _t.time() - t0
+            print(f"  [llm] ERROR after {elapsed:.1f}s: {e}", flush=True)
             raise
 
     def stream(self, messages: list[dict], model: str | None = None) -> Iterator[str]:

@@ -488,22 +488,43 @@ class Ingester:
 
         total_chunks = 0
         for i, doc_file in enumerate(files, 1):
-            if on_progress:
-                on_progress(IngestionProgress(
-                    stage="extracting", progress=i / len(files),
-                    current_item=doc_file.name,
-                    total_items=len(files), completed_items=i - 1,
-                ))
+            def _file_progress(p: IngestionProgress):
+                if on_progress:
+                    on_progress(IngestionProgress(
+                        stage=p.stage,
+                        progress=(i - 1 + p.progress) / len(files),
+                        current_item=doc_file.name,
+                        total_items=len(files),
+                        completed_items=i - 1,
+                        message=f"[{i}/{len(files)}] {doc_file.name}: {p.message or p.stage}",
+                    ))
+
+            _file_progress(IngestionProgress(
+                stage="extracting", progress=0.0,
+                current_item=doc_file.name,
+                total_items=1, completed_items=0,
+                message="starting",
+            ))
             try:
                 file_name = f"{name} - {doc_file.stem}"
                 n = self.ingest_file(
                     path=str(doc_file), name=file_name, topic=topic, subtopic=subtopic,
-                    enrich=True,
+                    enrich=True, on_progress=_file_progress,
                 )
                 total_chunks += n
-                print(f"[{i}/{len(files)}] {doc_file.name} -> {n} chunks")
+                _file_progress(IngestionProgress(
+                    stage="done", progress=1.0,
+                    current_item=doc_file.name,
+                    total_items=1, completed_items=1,
+                    message=f"{n} chunks (total: {total_chunks})",
+                ))
             except Exception as e:
-                print(f"[{i}/{len(files)}] {doc_file.name} x {e}")
+                _file_progress(IngestionProgress(
+                    stage="error", progress=1.0,
+                    current_item=doc_file.name,
+                    total_items=1, completed_items=1,
+                    message=f"FAILED: {e}",
+                ))
 
         if on_progress:
             on_progress(IngestionProgress(
