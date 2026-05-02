@@ -276,6 +276,17 @@ def search_wiki(
                 "result_type": "wiki",
             }
 
+    try:
+        from .query_intent import detect_query_intent
+        intent = detect_query_intent(query)
+        if intent.page_type_boosts:
+            for entry in seen.values():
+                boost = intent.page_type_boosts.get(entry.get("page_type", ""), 0)
+                if boost:
+                    entry["score"] += boost
+    except Exception:
+        pass
+
     results = sorted(seen.values(), key=lambda x: -x["score"])
 
     if not include_stale:

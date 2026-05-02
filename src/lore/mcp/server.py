@@ -548,12 +548,22 @@ def _register_tools(mcp: FastMCP) -> None:
             except Exception:
                 pass
 
-            return {
+            response = {
                 "success": True,
                 "query": query,
                 "total": len(results),
                 "results": formatted,
             }
+
+            try:
+                from ..core.query_intent import detect_query_intent
+                intent = detect_query_intent(query)
+                if intent.wiki_favorable and not intent.chunk_favorable:
+                    response["wiki_hint"] = intent.suggested_hint
+            except Exception:
+                pass
+
+            return response
         except Exception as e:
             return {"success": False, "error": str(e), "query": query, "total": 0, "results": []}
 
