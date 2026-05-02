@@ -326,6 +326,7 @@ class Store:
         tbl = self._get_or_create_table()
         tbl.delete(f"collection = '{_esc(collection)}'")
         self._optimize(tbl)
+        self._table = None
         _invalidate_derived_indexes(collection=collection)
 
     def delete_episode(self, collection: str, episode_num: int):
@@ -335,6 +336,7 @@ class Store:
             f"collection = '{_esc(collection)}' AND episode_num = {episode_num}"
         )
         self._optimize(tbl)
+        self._table = None
         _invalidate_derived_indexes(collection=collection)
 
     # ── Read ──────────────────────────────────────────────────────────
