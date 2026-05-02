@@ -29,6 +29,7 @@ import asyncio
 import json
 import re
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -57,6 +58,40 @@ def _get_session(session_id: str) -> dict:
         if session_id not in _sessions:
             _sessions[session_id] = {"last_shown_ids": [], "fetched_texts": {}}
         return _sessions[session_id]
+
+
+def _log_tool(
+    session_id: str,
+    tool_name: str,
+    request: dict | None = None,
+    result: dict | None = None,
+    entities: dict | None = None,
+    latency_ms: int | None = None,
+):
+    try:
+        db = get_database()
+        status = "error" if (result and result.get("success", True) is False) else "success"
+        error_text = result.get("error") if result and not result.get("success", True) else None
+        summary = None
+        if result:
+            if "total" in result:
+                summary = f"{result['total']} results"
+            elif "page_id" in result:
+                summary = result["page_id"]
+            elif "message" in result:
+                summary = result["message"]
+        db.log_event(
+            session_id=session_id,
+            tool_name=tool_name,
+            request=request,
+            response_summary=summary,
+            entities=entities,
+            status=status,
+            latency_ms=latency_ms,
+            error_text=error_text,
+        )
+    except Exception:
+        pass
 
 
 def _post_ingest_wiki(collection_display: str):
@@ -1167,22 +1202,33 @@ def _register_tools(mcp: FastMCP) -> None:
         Returns compact results with page_id, title, page_type,
         confidence, corroboration, and a text preview.
         """
-        from ..core.wiki_index import search_wiki
-
+        t0 = time.perf_counter()
         try:
+            from ..core.wiki_index import search_wiki
             results = search_wiki(
                 query=query,
                 page_type=page_type,
                 n_results=n_results,
                 include_stale=include_stale,
             )
-            return {
+            result = {
                 "success": True,
                 "total": len(results),
                 "results": results,
             }
+            _log_tool(_default_session_id, "wiki_search",
+                      request={"query": query, "page_type": page_type},
+                      result=result,
+                      entities={"page_ids": [r.get("page_id", "") for r in results]},
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
+            return result
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            err = {"success": False, "error": str(e)}
+            _log_tool(_default_session_id, "wiki_search",
+                      request={"query": query, "page_type": page_type},
+                      result=err,
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
+            return err
 
     # ── wiki_get_page ──────────────────────────────────────────────
 
@@ -1205,9 +1251,10 @@ def _register_tools(mcp: FastMCP) -> None:
 
         Provide either page_id (exact) or slug (searches all page types).
         """
-        from ..core.wiki import get_wiki_manager
-
+        t0 = time.perf_counter()
+        req = {"page_id": page_id, "slug": slug, "include_content": include_content}
         try:
+            from ..core.wiki import get_wiki_manager
             wm = get_wiki_manager()
 
             if not page_id and slug:
@@ -1218,11 +1265,17 @@ def _register_tools(mcp: FastMCP) -> None:
                         break
 
             if not page_id:
-                return {"success": False, "error": "Provide page_id or slug"}
+                err = {"success": False, "error": "Provide page_id or slug"}
+                _log_tool(_default_session_id, "wiki_get_page", request=req, result=err,
+                          latency_ms=int((time.perf_counter() - t0) * 1000))
+                return err
 
             page = wm.get_page(page_id)
             if not page:
-                return {"success": False, "error": f"Page not found: {page_id}"}
+                err = {"success": False, "error": f"Page not found: {page_id}"}
+                _log_tool(_default_session_id, "wiki_get_page", request=req, result=err,
+                          latency_ms=int((time.perf_counter() - t0) * 1000))
+                return err
 
             result = {
                 "success": True,
@@ -1256,9 +1309,15 @@ def _register_tools(mcp: FastMCP) -> None:
                     chunk_ids.extend(c.get("chunk_ids", []))
                 result["provenance_chunk_ids"] = sorted(set(chunk_ids))
 
+            _log_tool(_default_session_id, "wiki_get_page", request=req, result=result,
+                      entities={"page_id": page_id, "chunk_ids": result.get("provenance_chunk_ids", [])},
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
             return result
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            err = {"success": False, "error": str(e)}
+            _log_tool(_default_session_id, "wiki_get_page", request=req, result=err,
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
+            return err
 
     # ── wiki_generate_page ─────────────────────────────────────────
 
@@ -1282,10 +1341,11 @@ def _register_tools(mcp: FastMCP) -> None:
         - collections: required for comparison — 2-4 collection names
         - force: regenerate even if current page is fresh
         """
-        from ..core.wiki_generate import generate_entity_page, generate_concept_page, generate_comparison_page
-        from ..core.wiki import get_wiki_manager
-
+        t0 = time.perf_counter()
+        req = {"page_type": page_type, "target": target, "collections": collections}
         try:
+            from ..core.wiki_generate import generate_entity_page, generate_concept_page, generate_comparison_page
+            from ..core.wiki import get_wiki_manager
             if page_type == "entity":
                 page = generate_entity_page(target, force=force)
             elif page_type == "concept":
@@ -1293,16 +1353,28 @@ def _register_tools(mcp: FastMCP) -> None:
             elif page_type == "source":
                 wm = get_wiki_manager()
                 count = wm.generate_source_pages(collection=target, force=force)
-                return {"success": True, "message": f"Generated/refreshed {count} source pages"}
+                result = {"success": True, "message": f"Generated/refreshed {count} source pages"}
+                _log_tool(_default_session_id, "wiki_generate_page", request=req, result=result,
+                          latency_ms=int((time.perf_counter() - t0) * 1000))
+                return result
             elif page_type == "comparison":
                 if not collections or len(collections) < 2:
-                    return {"success": False, "error": "Comparison requires 'collections' with 2-4 collection names."}
+                    err = {"success": False, "error": "Comparison requires 'collections' with 2-4 collection names."}
+                    _log_tool(_default_session_id, "wiki_generate_page", request=req, result=err,
+                              latency_ms=int((time.perf_counter() - t0) * 1000))
+                    return err
                 page = generate_comparison_page(target, collections, force=force)
             else:
-                return {"success": False, "error": f"Unknown page_type: {page_type}. Use entity, concept, source, or comparison."}
+                err = {"success": False, "error": f"Unknown page_type: {page_type}. Use entity, concept, source, or comparison."}
+                _log_tool(_default_session_id, "wiki_generate_page", request=req, result=err,
+                          latency_ms=int((time.perf_counter() - t0) * 1000))
+                return err
 
             if not page:
-                return {"success": False, "error": f"Not enough evidence to generate {page_type} page for '{target}'"}
+                err = {"success": False, "error": f"Not enough evidence to generate {page_type} page for '{target}'"}
+                _log_tool(_default_session_id, "wiki_generate_page", request=req, result=err,
+                          latency_ms=int((time.perf_counter() - t0) * 1000))
+                return err
 
             result = {
                 "success": True,
@@ -1317,9 +1389,15 @@ def _register_tools(mcp: FastMCP) -> None:
             if dropped:
                 result["dropped_collections"] = dropped
                 result["note"] = f"Collections excluded (insufficient evidence on '{target}'): {', '.join(dropped)}"
+            _log_tool(_default_session_id, "wiki_generate_page", request=req, result=result,
+                      entities={"page_id": result.get("page_id", "")},
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
             return result
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            err = {"success": False, "error": str(e)}
+            _log_tool(_default_session_id, "wiki_generate_page", request=req, result=err,
+                      latency_ms=int((time.perf_counter() - t0) * 1000))
+            return err
 
     # ── wiki_related ───────────────────────────────────────────────
 

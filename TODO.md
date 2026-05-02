@@ -35,7 +35,7 @@
 - [ ] **Ingest compounding** — when a source is ingested, proactively update existing entity/concept pages that reference overlapping entities/tags, not just mark stale. Karpathy: "a single source typically touches 10-15 wiki pages."
 - [ ] **Q&A → wiki filing** — mechanism for agent answers to be filed back as new wiki pages so explorations compound the knowledge base. Core Karpathy compounding pattern.
 - [ ] **Typed relationships** — claim/page-level semantic relations: supports, contradicts, supersedes, extends. Current backlinks only say "connected", not how. Step toward LLM Wiki v2.
-- [ ] **Activity log** — append-only log.md or SQLite equivalent recording all ingests, wiki generations, queries. Karpathy's log.md pattern. Overlaps with session event log in feedback loop.
+- [x] **Activity log** — unified events table in SQLite: all wiki tool calls logged with session_id, latency, status, error, entities. Covers Karpathy's log.md pattern. Overlaps with session event log.
 
 ### Phase 3 — scale
 - [ ] **Recursive wiki generation** — autonomous "discover and write all missing pages"
@@ -46,7 +46,7 @@
 
 ## Agent Feedback Loop (replaces rate_result)
 Design: session-level implicit telemetry + explicit `cite` signal. Log passively, materialize scores lazily, boost ranking gently. Demand-driven wiki generation consumes these signals.
-- [ ] **Session event log** — append-only SQLite: every search, get_context, wiki_get_page, search_deep logged with session_id + timestamp
+- [x] **Session event log** — unified `events` table in SQLite with session_id, tool_name, latency_ms, status, request/response/entities JSON. Wiki tools fully instrumented (all exit paths). `log_event()`/`get_events()` API.
 - [ ] **`cite` tool** — replaces rate_result. Agent passes list of chunk_ids it used in its answer. Low friction, positive-only signal.
 - [ ] **`mark_gap` tool** — agent signals "I needed X and it doesn't exist." Feeds ingest priority queue + wiki page candidates.
 - [ ] **Implicit signal extraction** — open_rate (opened/shown), abandon_rate (opened then re-queried), search_deep fallback rate per query pattern

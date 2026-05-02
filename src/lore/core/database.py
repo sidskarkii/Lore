@@ -60,6 +60,27 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     completed_at TEXT,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    ts TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    event_type TEXT NOT NULL DEFAULT 'tool_call',
+    status TEXT NOT NULL DEFAULT 'success',
+    latency_ms INTEGER,
+    request_json TEXT,
+    response_summary TEXT,
+    entities_json TEXT,
+    error_text TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_events_session_ts
+    ON events(session_id, ts);
+
+CREATE INDEX IF NOT EXISTS idx_events_tool_ts
+    ON events(tool_name, ts);
 """
 
 _SCHEMA = """
@@ -479,6 +500,58 @@ class Database:
         rows = self._conn.execute(
             "SELECT * FROM ingestion_log WHERE status NOT IN ('done', 'failed')"
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ── Event Log ─────────────────────────────────────────────────────
+
+    def log_event(
+        self,
+        session_id: str,
+        tool_name: str,
+        request: dict | None = None,
+        response_summary: str | None = None,
+        entities: dict | None = None,
+        status: str = "success",
+        latency_ms: int | None = None,
+        event_type: str = "tool_call",
+        error_text: str | None = None,
+    ):
+        self._conn.execute(
+            "INSERT INTO events (event_id, ts, session_id, tool_name, event_type, "
+            "status, latency_ms, request_json, response_summary, entities_json, error_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                _new_id(), _now(), session_id, tool_name, event_type,
+                status, latency_ms,
+                json.dumps(request) if request else None,
+                response_summary,
+                json.dumps(entities) if entities else None,
+                error_text,
+            ),
+        )
+        self._conn.commit()
+
+    def get_events(
+        self,
+        session_id: str | None = None,
+        tool_name: str | None = None,
+        event_type: str | None = None,
+        limit: int = 50,
+    ) -> list[dict]:
+        parts = ["SELECT * FROM events WHERE 1=1"]
+        params: list = []
+        if session_id:
+            parts.append("AND session_id = ?")
+            params.append(session_id)
+        if tool_name:
+            parts.append("AND tool_name = ?")
+            params.append(tool_name)
+        if event_type:
+            parts.append("AND event_type = ?")
+            params.append(event_type)
+        parts.append("ORDER BY ts DESC LIMIT ?")
+        params.append(limit)
+        rows = self._conn.execute(" ".join(parts), params).fetchall()
         return [dict(r) for r in rows]
 
 
