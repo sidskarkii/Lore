@@ -452,8 +452,37 @@ class Ingester:
         if not path.is_dir():
             raise FileNotFoundError(f"Path not found: {path}")
 
-        DOC_EXTS = {".md", ".markdown", ".rst", ".txt", ".pdf", ".epub"}
-        files = sorted([f for f in path.rglob("*") if f.suffix.lower() in DOC_EXTS])
+        DOC_EXTS = {".md", ".mdx", ".markdown", ".rst", ".txt", ".pdf", ".epub"}
+        SKIP_NAMES = {
+            "changelog", "license", "licence", "code_of_conduct",
+            "contributing", "security", "antitrust", "governance",
+            "maintainers", "template",
+        }
+        SKIP_PATTERNS = {"schema", ".generated.", ".lock", "package-lock"}
+        SKIP_DIRS = {
+            "node_modules", "dist", "build", "vendor", "__pycache__",
+            ".git", ".next", ".cache", "coverage",
+        }
+        MAX_FILE_SIZE = 100_000
+
+        def _should_skip(f: Path) -> bool:
+            if any(d in f.parts for d in SKIP_DIRS):
+                return True
+            stem = f.stem.lower()
+            if stem in SKIP_NAMES:
+                return True
+            name_lower = f.name.lower()
+            if any(p in name_lower for p in SKIP_PATTERNS):
+                return True
+            if f.stat().st_size > MAX_FILE_SIZE:
+                print(f"  [ingest] Skipping large file ({f.stat().st_size // 1024}KB): {f.name}")
+                return True
+            return False
+
+        files = sorted([
+            f for f in path.rglob("*")
+            if f.suffix.lower() in DOC_EXTS and not _should_skip(f)
+        ])
         if not files:
             raise ValueError(f"No document files found in {path}")
 

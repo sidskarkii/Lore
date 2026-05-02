@@ -941,7 +941,10 @@ def _register_tools(mcp: FastMCP) -> None:
                 elif is_url:
                     chunks = await asyncio.to_thread(ingester.ingest_url, url=source, **kwargs)
                 elif is_dir:
-                    chunks = await asyncio.to_thread(ingester.ingest_folder, folder=source, **kwargs)
+                    try:
+                        chunks = await asyncio.to_thread(ingester.ingest_documents, path=source, **kwargs)
+                    except (ValueError, FileNotFoundError):
+                        chunks = await asyncio.to_thread(ingester.ingest_folder, folder=source, **kwargs)
                 else:
                     chunks = await asyncio.to_thread(ingester.ingest_file, path=source, **kwargs)
 

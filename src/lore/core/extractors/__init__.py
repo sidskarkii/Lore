@@ -18,6 +18,8 @@ _EXTENSION_MAP: dict[str, str] = {
     ".epub": "epub",
     # text / markup
     ".md": "text",
+    ".mdx": "text",
+    ".markdown": "text",
     ".txt": "text",
     ".rst": "text",
     ".html": "text",
