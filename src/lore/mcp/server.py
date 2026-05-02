@@ -1,6 +1,6 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (22):
+Tools (23):
     intro              — deep orientation: collections, summaries, health, workflows
     search             — hybrid search (vector + BM25 + reranking)
     search_deep        — multi-hop decomposition for complex queries
@@ -23,6 +23,7 @@ Tools (22):
     wiki_queue         — manage stale/missing pages
     wiki_lint          — audit wiki health (broken provenance, orphans, gaps)
     wiki_generate_all  — recursive generation (plan/repair/expand modes)
+    wiki_hierarchy     — browse page hierarchy (type indexes + topic clusters)
 """
 
 from __future__ import annotations
@@ -1747,6 +1748,61 @@ def _register_tools(mcp: FastMCP) -> None:
                 "skipped_details": skipped[:10],
                 "failures": failed[:10],
             }
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_hierarchy ────────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def wiki_hierarchy(
+        action: Annotated[str, Field(default="browse", description="Action: 'browse' (show hierarchy), 'rebuild' (recompute clusters), 'cluster' (show one cluster by ID).")] = "browse",
+        cluster_id: Annotated[int | None, Field(default=None, description="Cluster ID to inspect (for action='cluster').")] = None,
+    ) -> dict:
+        """Browse the wiki page hierarchy — type indexes and topic clusters.
+
+        WHEN TO USE: To understand how wiki pages are organized, find
+        related pages within topic groups, or navigate the wiki structure.
+
+        Actions:
+        - browse: show type indexes and topic cluster summaries
+        - rebuild: recompute clusters from current page data
+        - cluster: show full details for a specific topic cluster
+        """
+        try:
+            from ..core.wiki_hierarchy import build_hierarchy, load_hierarchy
+
+            if action == "rebuild":
+                h = build_hierarchy()
+                return {"success": True, "action": "rebuild", **h}
+
+            if action == "cluster":
+                h = load_hierarchy()
+                if not h:
+                    h = build_hierarchy()
+                if cluster_id is None:
+                    return {"success": False, "error": "Provide cluster_id for action='cluster'."}
+                for c in h.get("topic_clusters", []):
+                    if c["cluster_id"] == cluster_id:
+                        return {"success": True, "action": "cluster", **c}
+                return {"success": False, "error": f"Cluster {cluster_id} not found."}
+
+            if action == "browse":
+                h = load_hierarchy()
+                if not h:
+                    h = build_hierarchy()
+
+                summary = {
+                    "total_pages": h["total_pages"],
+                    "total_clusters": h["total_clusters"],
+                    "type_indexes": {t: len(pages) for t, pages in h["type_indexes"].items()},
+                    "clusters": [
+                        {"cluster_id": c["cluster_id"], "label": c["label"], "page_count": c["page_count"]}
+                        for c in h["topic_clusters"]
+                    ],
+                }
+                return {"success": True, "action": "browse", **summary}
+
+            return {"success": False, "error": f"Unknown action: {action}. Use browse, rebuild, or cluster."}
         except Exception as e:
             return {"success": False, "error": str(e)}
 

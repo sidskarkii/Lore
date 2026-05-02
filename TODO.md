@@ -40,7 +40,7 @@
 ### Phase 3 — scale
 - [x] **Recursive wiki generation** — wiki_generate_all MCP tool (22 tools). Modes: plan/plan_repair (dry-run + cost estimate), repair (broken links only), expand (full candidate pool). Candidate ranking: 0.40*link_pressure + 0.25*evidence + 0.20*source_diversity + 0.15*centrality. Batch waves, created/skipped/failed tracking.
 - [x] **Claim contradiction resolution** — wiki_contradictions.py: embedding similarity + negation asymmetry on entity-grouped claim pairs. Contradictions manifest (contradictions.json), integrated into wiki_lint as 'contradictions' check. Confidence levels (high/medium/low), always-overwrite manifest.
-- [ ] **Page hierarchy + index surfaces** — parent-child taxonomies, community-based auto-grouping, navigable index.md equivalent. Essential at scale (thousands of pages).
+- [x] **Page hierarchy + index surfaces** — wiki_hierarchy MCP tool (23 tools). Average-linkage Jaccard clustering on shared concept/entity references. Type indexes + topic clusters with extractive labels. Browse/rebuild/cluster actions. Hierarchy manifest persisted.
 - [ ] **Demand-driven generation** — part of feedback loop: session log signals trigger page creation for popular topics
 - [ ] **Wiki-maintenance schema** — single governance document (Layer 3) encoding ingest norms, update rules, consistency policies, page-writing conventions. Currently scattered across design docs.
 
