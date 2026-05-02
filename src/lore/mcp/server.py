@@ -95,6 +95,85 @@ def _log_tool(
         pass
 
 
+def _compound_wiki_pages(coll_id: str, wm) -> int:
+    """Regenerate existing entity/concept pages that overlap with a newly ingested collection."""
+    from ..core.wiki_generate import generate_entity_page, generate_concept_page
+    from ..core.wiki import _slug
+    from ..core.wiki_lint import _parse_tags
+    from ..core.store import get_store
+
+    store = get_store()
+    chunks = store.get_all_chunks(coll_id)
+    if not chunks:
+        return 0
+
+    try:
+        from ..core.entities import get_entity_index
+        ei = get_entity_index()
+    except Exception:
+        ei = None
+
+    new_entity_canonicals: set[str] = set()
+    new_tag_slugs: set[str] = set()
+    for ch in chunks:
+        ents_raw = ch.get("entities", "")
+        if ents_raw:
+            try:
+                ents = json.loads(ents_raw) if isinstance(ents_raw, str) else ents_raw
+                for e in ents:
+                    if isinstance(e, dict):
+                        name = e.get("name", "")
+                        if ei:
+                            cluster = ei.resolve(name)
+                            if cluster:
+                                new_entity_canonicals.add(cluster.canonical.lower())
+                                continue
+                        new_entity_canonicals.add(name.lower())
+            except (ValueError, TypeError):
+                pass
+        for t in _parse_tags(ch.get("concept_tags", "")):
+            s = _slug(t)
+            if s:
+                new_tag_slugs.add(s)
+
+    if not new_entity_canonicals and not new_tag_slugs:
+        return 0
+
+    stale_ids = {p["page_id"] for p in wm.get_stale_pages()}
+    compounded = 0
+
+    for meta in wm.list_pages():
+        pid = meta["page_id"]
+        if pid in stale_ids:
+            continue
+        ptype = meta.get("page_type", "")
+        slug = pid.split("/", 1)[-1] if "/" in pid else pid
+        title = meta.get("title", slug)
+
+        if ptype == "entity":
+            canonical = title.lower()
+            if ei:
+                cluster = ei.resolve(title)
+                if cluster:
+                    canonical = cluster.canonical.lower()
+            if canonical in new_entity_canonicals:
+                try:
+                    generate_entity_page(title, force=True)
+                    compounded += 1
+                except Exception:
+                    pass
+
+        elif ptype == "concept":
+            if slug in new_tag_slugs:
+                try:
+                    generate_concept_page(slug, force=True)
+                    compounded += 1
+                except Exception:
+                    pass
+
+    return compounded
+
+
 def _post_ingest_wiki(collection_display: str):
     """Auto-generate wiki pages after successful ingest."""
     try:
@@ -129,6 +208,10 @@ def _post_ingest_wiki(collection_display: str):
                     pass
             if refreshed:
                 print(f"  [wiki] Refreshed {refreshed} stale pages")
+
+            compounded = _compound_wiki_pages(coll_id, wm)
+            if compounded:
+                print(f"  [wiki] Compounded {compounded} overlapping pages with new source")
 
             concept_pages = generate_wiki_pages(page_type="concept", limit=10, min_chunks=3)
             entity_pages = generate_wiki_pages(page_type="entity", limit=10, min_chunks=2)
