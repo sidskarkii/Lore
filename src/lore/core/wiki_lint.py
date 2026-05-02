@@ -21,6 +21,7 @@ class Finding:
 _VALID_CHECKS = {
     "stale", "orphan", "weak_claims", "claim_summary",
     "broken_links", "broken_provenance", "generation_drift", "source_gaps",
+    "contradictions",
 }
 
 
@@ -37,6 +38,7 @@ def lint_wiki(checks: list[str] | None = None) -> dict:
         "broken_links": _check_broken_links,
         "broken_provenance": _check_broken_provenance,
         "generation_drift": _check_generation_drift,
+        "contradictions": _check_contradictions,
         "source_gaps": _check_source_gaps,
     }
 
@@ -344,4 +346,36 @@ def _check_source_gaps(wm) -> list[Finding]:
             message=f"Could not check concept tag gaps: {e}",
         ))
 
+    return findings
+
+
+def _check_contradictions(wm) -> list[Finding]:
+    findings = []
+    try:
+        from .wiki_contradictions import detect_contradictions, save_contradictions
+        pairs = detect_contradictions()
+        save_contradictions(pairs)
+        for p in pairs:
+            severity = "warning" if p.confidence in ("high", "medium") else "info"
+            findings.append(Finding(
+                check="contradictions", severity=severity,
+                page_id=p.claim_a_page,
+                claim_id=p.claim_a_id,
+                message=f"Potential {p.confidence}-confidence contradiction with "
+                        f"{p.claim_b_page}/{p.claim_b_id} (sim={p.similarity:.2f}): "
+                        f"'{p.claim_a_text[:50]}' vs '{p.claim_b_text[:50]}'",
+            ))
+        if pairs:
+            findings.append(Finding(
+                check="contradictions", severity="info",
+                message=f"{len(pairs)} potential contradiction pairs detected "
+                        f"(high: {sum(1 for p in pairs if p.confidence == 'high')}, "
+                        f"medium: {sum(1 for p in pairs if p.confidence == 'medium')}, "
+                        f"low: {sum(1 for p in pairs if p.confidence == 'low')})",
+            ))
+    except Exception as e:
+        findings.append(Finding(
+            check="contradictions", severity="info",
+            message=f"Could not run contradiction check: {e}",
+        ))
     return findings
