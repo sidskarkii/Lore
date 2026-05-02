@@ -61,33 +61,28 @@ def _negation_asymmetry(text_a: str, text_b: str) -> bool:
 
 
 def _extract_subjects(claim: dict, page_id: str) -> set[str]:
-    """Extract subject terms from claim provenance for grouping."""
+    """Extract canonical entity names from claim provenance for grouping."""
     subjects = set()
-
-    if "/" in page_id:
-        slug = page_id.split("/", 1)[1]
-        if "--" in slug:
-            subjects.add(slug.split("--")[0].replace("-", " ").lower())
-        else:
-            subjects.add(slug.replace("-", " ").lower())
-
-    for coll in claim.get("collections", []):
-        subjects.add(coll.lower().replace("_", " "))
 
     try:
         from .entities import get_entity_index
+        from .cross_index import get_cross_index
         ei = get_entity_index()
+        ci = get_cross_index()
         for chunk_id in claim.get("chunk_ids", []):
-            from .cross_index import get_cross_index
-            ci = get_cross_index()
             cf = ci.by_chunk.get(chunk_id)
             if cf:
                 for ent in cf.entities:
                     cluster = ei.resolve(ent)
                     if cluster:
                         subjects.add(cluster.canonical.lower())
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [contradictions] Subject extraction degraded: {e}")
+
+    if not subjects and "/" in page_id:
+        ptype, slug = page_id.split("/", 1)
+        if ptype in ("entity", "concept"):
+            subjects.add(slug.replace("-", " ").lower())
 
     return subjects
 
