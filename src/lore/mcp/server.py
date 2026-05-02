@@ -1,6 +1,6 @@
 """Lore MCP server — exposes knowledge base tools to AI agents.
 
-Tools (21):
+Tools (22):
     intro              — deep orientation: collections, summaries, health, workflows
     search             — hybrid search (vector + BM25 + reranking)
     search_deep        — multi-hop decomposition for complex queries
@@ -22,6 +22,7 @@ Tools (21):
     wiki_claims        — inspect claim-level provenance
     wiki_queue         — manage stale/missing pages
     wiki_lint          — audit wiki health (broken provenance, orphans, gaps)
+    wiki_generate_all  — recursive generation (plan/repair/expand modes)
 """
 
 from __future__ import annotations
@@ -1650,6 +1651,102 @@ def _register_tools(mcp: FastMCP) -> None:
         try:
             from ..core.wiki_lint import lint_wiki
             return {"success": True, **lint_wiki(checks=checks)}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    # ── wiki_generate_all ─────────────────────────────────────────
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def wiki_generate_all(
+        mode: Annotated[str, Field(description="Mode: 'plan' (dry-run with cost estimate), 'repair' (broken links only), 'expand' (full candidate pool).")],
+        limit: Annotated[int, Field(default=25, ge=1, le=100, description="Max pages to generate per invocation.")] = 25,
+        min_chunks_concept: Annotated[int, Field(default=3, ge=1, description="Min evidence chunks for concept pages.")] = 3,
+        min_chunks_entity: Annotated[int, Field(default=2, ge=1, description="Min evidence chunks for entity pages.")] = 2,
+    ) -> dict:
+        """Recursive wiki generation — discover and write missing pages.
+
+        WHEN TO USE: After ingesting content, to fill wiki gaps. Use 'plan'
+        first to see what would be generated and the estimated cost, then
+        'repair' to fix broken links, or 'expand' for full coverage.
+
+        Modes:
+        - plan: dry-run returning ranked candidates, scores, and LLM cost estimate.
+          Shows what 'expand' would do. Use plan with limit to preview repair scope too.
+        - repair: generate only pages needed to resolve broken links
+        - expand: generate from the full candidate pool (broken links + new discoveries)
+
+        Candidates are ranked by: link pressure (40%), evidence count (25%),
+        source diversity (20%), graph centrality (15%). Pages are generated
+        in batch waves up to the limit.
+        """
+        try:
+            from ..core.wiki_candidates import plan as wiki_plan, discover_candidates
+            from ..core.wiki_generate import generate_entity_page, generate_concept_page
+            from ..core.wiki import get_wiki_manager
+
+            if mode in ("plan", "plan_repair"):
+                repair_only = (mode == "plan_repair")
+                result = wiki_plan(
+                    repair_only=repair_only, limit=limit,
+                    min_chunks_concept=min_chunks_concept,
+                    min_chunks_entity=min_chunks_entity,
+                )
+                return {"success": True, "mode": mode, **result}
+
+            if mode not in ("repair", "expand"):
+                return {"success": False, "error": f"Unknown mode: {mode}. Use plan, plan_repair, repair, or expand."}
+
+            wm = get_wiki_manager()
+            existing_before = {m["page_id"] for m in wm.list_pages()}
+
+            repair_only = (mode == "repair")
+            candidates = discover_candidates(
+                repair_only=repair_only,
+                min_chunks_concept=min_chunks_concept,
+                min_chunks_entity=min_chunks_entity,
+            )[:limit]
+
+            created = []
+            skipped = []
+            failed = []
+            for c in candidates:
+                try:
+                    if c.page_type == "entity":
+                        page = generate_entity_page(c.target, force=False)
+                    elif c.page_type == "concept":
+                        page = generate_concept_page(c.target, force=False)
+                    else:
+                        continue
+                    if not page:
+                        failed.append({"target": c.target, "reason": "insufficient evidence"})
+                    elif page.page_id in existing_before:
+                        skipped.append({"page_id": page.page_id, "reason": "already exists"})
+                    else:
+                        created.append({
+                            "page_id": page.page_id,
+                            "title": page.title,
+                            "claim_count": page.generation.get("claim_count", 0),
+                            "score": round(c.score, 4),
+                        })
+                except Exception as e:
+                    failed.append({"target": c.target, "reason": str(e)[:100]})
+
+            try:
+                from ..core.wiki_index import rebuild_fts
+                rebuild_fts()
+            except Exception:
+                pass
+
+            return {
+                "success": True,
+                "mode": mode,
+                "created": len(created),
+                "skipped": len(skipped),
+                "failed": len(failed),
+                "pages": created,
+                "skipped_details": skipped[:10],
+                "failures": failed[:10],
+            }
         except Exception as e:
             return {"success": False, "error": str(e)}
 

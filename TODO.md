@@ -38,7 +38,7 @@
 - [x] **Activity log** — unified events table in SQLite: all wiki tool calls logged with session_id, latency, status, error, entities. Covers Karpathy's log.md pattern. Overlaps with session event log.
 
 ### Phase 3 — scale
-- [ ] **Recursive wiki generation** — autonomous "discover and write all missing pages"
+- [x] **Recursive wiki generation** — wiki_generate_all MCP tool (22 tools). Modes: plan/plan_repair (dry-run + cost estimate), repair (broken links only), expand (full candidate pool). Candidate ranking: 0.40*link_pressure + 0.25*evidence + 0.20*source_diversity + 0.15*centrality. Batch waves, created/skipped/failed tracking.
 - [ ] **Claim contradiction resolution** — multi-source disagreement detection and surfacing
 - [ ] **Page hierarchy + index surfaces** — parent-child taxonomies, community-based auto-grouping, navigable index.md equivalent. Essential at scale (thousands of pages).
 - [ ] **Demand-driven generation** — part of feedback loop: session log signals trigger page creation for popular topics
