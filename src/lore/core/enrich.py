@@ -142,6 +142,8 @@ def _extract_json(response: str) -> list[dict]:
         else:
             raise
 
+    if isinstance(results, dict) and "results" in results:
+        results = results["results"]
     if not isinstance(results, list):
         results = [results]
     return results
@@ -205,6 +207,10 @@ def _extract_entities_batch(texts: list[str]) -> list[list[dict]]:
 # ── Prompts ──────────────────────────────────────────────────────────
 
 _STAGE2_SYSTEM = """You are enriching document chunks for a retrieval system. Extract stable metadata faithful to the chunk text.
+
+CRITICAL FORMAT RULE: Return valid JSON only. No markdown, no prose, no code fences.
+Output exactly one JSON object: {"results":[...array of enrichment objects...]}
+Return one result per input passage, in the same order. Do not omit, merge, split, or add items.
 
 Rules:
 - The chunk text is the source of truth. Candidate cues and rolling keys are hints, not facts.
@@ -276,6 +282,9 @@ Passages:
 Return a JSON array with one object per passage, matching the schema exactly."""
 
 _STAGE3_SYSTEM = """You are updating a section-level synthesis for a retrieval system.
+
+CRITICAL FORMAT RULE: Return valid JSON only. No markdown, no prose, no code fences.
+Output exactly one JSON object: {"results":[...your output...]}
 
 Rules:
 - Original chunk text is primary evidence. Chunk metadata is structured hints.
