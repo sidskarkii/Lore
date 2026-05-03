@@ -651,8 +651,10 @@ class Ingester:
                     message="Extracting keywords and entities...",
                 ))
             chunks = enrich_programmatic(chunks)
+            print(f"  [ingest] After programmatic: {len(chunks)} chunks, keywords={bool(chunks[0].get('keywords') if chunks else False)}", flush=True)
 
             provider = get_registry().active
+            print(f"  [ingest] Provider: {provider.name if provider else 'NONE'}", flush=True)
             book_title = doc.metadata.get("book_title", doc.metadata.get("page_title", name))
             if provider:
                 def _llm_progress(batch_num, total_batches, cached):
@@ -663,6 +665,10 @@ class Ingester:
                             message=f"Stage 2: chunk titles batch {batch_num}/{total_batches} ({cached} cached)...",
                         ))
                 chunks = enrich_chunks_stage2(chunks, provider, book_title=book_title, on_progress=_llm_progress)
+                enriched_count = sum(1 for c in chunks if c.get("title"))
+                print(f"  [ingest] After stage2: {enriched_count}/{len(chunks)} have titles", flush=True)
+                if chunks:
+                    print(f"  [ingest] Sample title: '{chunks[0].get('title', 'EMPTY')}'", flush=True)
 
                 if on_progress:
                     on_progress(IngestionProgress(
@@ -700,6 +706,9 @@ class Ingester:
                 toc = [s["section"] for s in section_summaries]
                 author = doc.metadata.get("author", "")
                 book_summary = enrich_book_stage4(section_summaries, provider, book_title=book_title, author=author, toc=toc)
+                print(f"  [ingest] After stage4: summary overview={bool(book_summary.get('overview'))}", flush=True)
+            else:
+                print(f"  [ingest] NO PROVIDER — skipping LLM enrichment", flush=True)
 
         meta = {
             "collection": collection,
@@ -719,9 +728,12 @@ class Ingester:
                 total_items=1, completed_items=0,
                 message="Saving to archive...",
             ))
+        enriched_before_save = sum(1 for c in chunks if c.get("title"))
+        print(f"  [ingest] Before archive save: {enriched_before_save}/{len(chunks)} have titles", flush=True)
         self._save_archive(collection, doc, chunks, meta,
                            section_summaries=section_summaries if provider else None,
                            book_summary=book_summary if provider else None)
+        print(f"  [ingest] Archive saved: {collection}", flush=True)
 
         if on_progress:
             on_progress(IngestionProgress(

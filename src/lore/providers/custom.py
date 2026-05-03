@@ -62,7 +62,7 @@ class CustomProvider(Provider):
             base_url=base_url,
             api_key=api_key or "none",
             max_retries=0,
-            timeout=httpx.Timeout(120.0, connect=15.0),
+            timeout=httpx.Timeout(600.0, connect=15.0),
         )
 
     def chat(self, messages: list[dict], model: str | None = None, max_tokens: int = 8192) -> str:
@@ -78,6 +78,7 @@ class CustomProvider(Provider):
                 model=model,
                 messages=messages,
                 max_tokens=max_tokens,
+                response_format={"type": "json_object"},
             )
             content = response.choices[0].message.content
             elapsed = _t.time() - t0

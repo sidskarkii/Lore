@@ -505,7 +505,7 @@ def enrich_chunks_stage2(
     """Stage 2: Chunk-level enrichment with rolling key dictionary and Stage 1 cues."""
     min_interval = 60.0 / calls_per_min
     cache = _get_enrichment_cache()
-    batch_size = 5
+    batch_size = 2
 
     enrichable = []
     cached_count = 0
@@ -575,10 +575,14 @@ def enrich_chunks_stage2(
             response = _llm_call_with_retry(provider, [system_msg, user_msg], model=stage2_model)
             results = _extract_json(response)
 
-            if len(results) != len(batch):
-                print(f"  [stage2] Batch {batch_num}: expected {len(batch)} results, got {len(results)} — marking failed")
+            if len(results) < len(batch):
+                print(f"  [stage2] Batch {batch_num}: expected {len(batch)} results, got {len(results)} — marking failed", flush=True)
+                print(f"  [stage2] Raw response (first 300 chars): {response[:300]}", flush=True)
                 failed.append((batch, section))
                 continue
+            if len(results) > len(batch):
+                print(f"  [stage2] Batch {batch_num}: LLM returned {len(results)} for {len(batch)} chunks — truncating", flush=True)
+                results = results[:len(batch)]
 
             for (orig_idx, chunk), enrichment in zip(batch, results):
                 _apply_enrichment(chunk, enrichment)
@@ -589,12 +593,13 @@ def enrich_chunks_stage2(
             prev_title = last_enriched.get("title", "")
             prev_summary = last_enriched.get("summary", "")
             prev_tags = ", ".join(last_enriched.get("concept_tags", []))
+            print(f"  [stage2] Batch {batch_num}/{total_batches} OK: {len(results)} enriched, title='{prev_title[:40]}'", flush=True)
         except Exception as e:
-            print(f"  [stage2] Batch {batch_num} failed: {type(e).__name__}")
+            print(f"  [stage2] Batch {batch_num} FAILED: {type(e).__name__}: {e}", flush=True)
             failed.append((batch, section))
 
     if failed:
-        print(f"  [stage2] Retrying {len(failed)} failed batches with fallback models...")
+        print(f"  [stage2] Retrying {len(failed)} failed batches with fallback models...", flush=True)
         for batch, section in failed:
             time.sleep(min_interval)
             chunks_text = "\n".join(f"--- Passage {i+1} ---\n{c['text']}" for i, (_, c) in enumerate(batch))
@@ -610,14 +615,18 @@ def enrich_chunks_stage2(
             try:
                 response = _llm_call_with_fallback(provider, [system_msg, user_msg])
                 results = _extract_json(response)
-                if len(results) != len(batch):
-                    print(f"  [stage2] Fallback returned {len(results)} results for {len(batch)} chunks — skipping")
+                if len(results) > len(batch):
+                    print(f"  [stage2] Fallback: LLM returned {len(results)} for {len(batch)} — truncating", flush=True)
+                    results = results[:len(batch)]
+                if len(results) < len(batch):
+                    print(f"  [stage2] Fallback: expected {len(batch)} results, got {len(results)} — skipping", flush=True)
                 else:
                     for (orig_idx, chunk), enrichment in zip(batch, results):
                         _apply_enrichment(chunk, enrichment)
                         rolling_keys.update_from_chunk(enrichment.get("concept_tags", []), orig_idx)
+                    print(f"  [stage2] Fallback OK: {len(results)} enriched", flush=True)
             except Exception as e:
-                print(f"  [stage2] Retry permanently failed: {e}")
+                print(f"  [stage2] Retry permanently failed: {e}", flush=True)
 
     _save_enrichment_cache()
     return chunks
