@@ -319,6 +319,38 @@ class Store:
         except Exception:
             pass
 
+    def update_chunk_metadata(self, collection: str, chunks: list[dict]) -> int:
+        """Update enrichment metadata for existing chunks matched by content_hash."""
+        tbl = self._get_or_create_table()
+        updated = 0
+        for chunk in chunks:
+            h = hashlib.sha256(chunk.get("text", "").encode()).hexdigest()[:16]
+            try:
+                rows = tbl.search().where(
+                    f"collection = '{_esc(collection)}' AND content_hash = '{_esc(h)}'"
+                ).select(["id"]).limit(1).to_list()
+                if not rows:
+                    continue
+                tbl.update(
+                    where=f"content_hash = '{_esc(h)}' AND collection = '{_esc(collection)}'",
+                    values={
+                        "title": chunk.get("title", ""),
+                        "summary": chunk.get("summary", ""),
+                        "keywords": chunk.get("keywords", ""),
+                        "concept_tags": chunk.get("concept_tags", ""),
+                        "importance": int(chunk.get("importance", 3)),
+                        "questions": chunk.get("questions", ""),
+                        "semantic_key": chunk.get("semantic_key", ""),
+                    },
+                )
+                updated += 1
+            except Exception:
+                continue
+        if updated:
+            self._rebuild_fts(tbl)
+            _invalidate_derived_indexes(collection=collection)
+        return updated
+
     # ── Delete ────────────────────────────────────────────────────────
 
     def delete_collection(self, collection: str):

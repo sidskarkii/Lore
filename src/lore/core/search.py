@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+from dataclasses import dataclass
 
 from flashrank import Ranker, RerankRequest
 
@@ -16,6 +17,34 @@ from .config import get_config
 from .embed import embed_texts
 from .lifecycle import Slot, get_model_manager
 from .store import Store, get_store
+
+
+@dataclass
+class SearchConfig:
+    use_vector: bool = True
+    use_bm25: bool = True
+    use_entity_boost: bool = True
+    use_reranker: bool = True
+    use_rating_boost: bool = True
+    use_session_dedup: bool = True
+    use_expansion: bool = False
+    rrf_k: int | None = None
+    candidate_count: int | None = None
+    vector_weight: float = 1.5
+    bm25_weight: float = 1.0
+    entity_weight: float = 0.5
+
+    @classmethod
+    def vector_only(cls): return cls(use_bm25=False, use_entity_boost=False, use_reranker=False, use_rating_boost=False, use_session_dedup=False)
+
+    @classmethod
+    def bm25_only(cls): return cls(use_vector=False, use_entity_boost=False, use_reranker=False, use_rating_boost=False, use_session_dedup=False)
+
+    @classmethod
+    def hybrid_rrf(cls): return cls(use_reranker=False, use_rating_boost=False, use_session_dedup=False)
+
+    @classmethod
+    def full_pipeline(cls): return cls(use_rating_boost=False, use_session_dedup=False)
 
 _reranker_slot: Slot | None = None
 _engine_instance: "SearchEngine | None" = None
@@ -69,11 +98,13 @@ def _rerank(query: str, candidates: list[dict], n: int) -> list[dict]:
     return [c for c, _ in _rerank_with_scores(query, candidates, n)]
 
 
-def _rrf(ranked_lists: list[list[str]], k: int = 60) -> dict[str, float]:
+def _rrf(ranked_lists: list[list[str]], k: int = 60, weights: list[float] | None = None) -> dict[str, float]:
     scores: dict[str, float] = {}
-    for ranking in ranked_lists:
+    if weights is None:
+        weights = [1.0] * len(ranked_lists)
+    for ranking, w in zip(ranked_lists, weights):
         for rank, doc_id in enumerate(ranking):
-            scores[doc_id] = scores.get(doc_id, 0) + 1.0 / (k + rank + 1)
+            scores[doc_id] = scores.get(doc_id, 0) + w / (k + rank + 1)
     return scores
 
 
@@ -238,23 +269,30 @@ class SearchEngine:
 
     def _retrieve_once(
         self, query: str, candidate_count: int, rrf_k: int, where: str | None,
-        label: str = "",
+        label: str = "", sc: SearchConfig | None = None,
     ) -> tuple[dict[str, dict], list[str]]:
         """Single-query retrieval: embed + vector + FTS + entity RRF.
 
         Returns (all_by_id, ranked_ids).
         """
+        if sc is None:
+            sc = SearchConfig()
         tag = f"  [{label or 'search'}] " if label else "  [search] "
         t0 = time.perf_counter()
 
-        query_vec = embed_texts([query])[0]
+        vec_results = []
+        fts_results = []
+
+        if sc.use_vector:
+            query_vec = embed_texts([query])[0]
+            vec_results = self.store.vector_search(query_vec, n=candidate_count, where=where)
+
         t1 = time.perf_counter()
 
-        vec_results = self.store.vector_search(query_vec, n=candidate_count, where=where)
-        t2 = time.perf_counter()
+        if sc.use_bm25:
+            fts_results = self.store.fts_search(query, n=candidate_count, where=where)
 
-        fts_results = self.store.fts_search(query, n=candidate_count, where=where)
-        t3 = time.perf_counter()
+        t2 = time.perf_counter()
 
         all_by_id: dict[str, dict] = {}
         for r in vec_results + fts_results:
@@ -264,16 +302,29 @@ class SearchEngine:
         vec_ids = [r["id"] for r in vec_results]
         fts_ids = [r["id"] for r in fts_results]
 
-        query_entities = _extract_query_entities(query)
-        if query_entities:
-            entity_ids = _entity_rank(list(all_by_id.values()), query_entities)
-            rrf_scores = _rrf([vec_ids, fts_ids, entity_ids], k=rrf_k)
-        else:
-            rrf_scores = _rrf([vec_ids, fts_ids], k=rrf_k)
-        t4 = time.perf_counter()
+        ranked_lists = []
+        rrf_weights = []
+        if vec_ids:
+            ranked_lists.append(vec_ids)
+            rrf_weights.append(sc.vector_weight)
+        if fts_ids:
+            ranked_lists.append(fts_ids)
+            rrf_weights.append(sc.bm25_weight)
 
-        print(f"{tag}embed={int((t1-t0)*1000)}ms vec={int((t2-t1)*1000)}ms({len(vec_results)}) "
-              f"fts={int((t3-t2)*1000)}ms({len(fts_results)}) rrf={int((t4-t3)*1000)}ms")
+        if sc.use_entity_boost:
+            query_entities = _extract_query_entities(query)
+            if query_entities:
+                entity_ids = _entity_rank(list(all_by_id.values()), query_entities)
+                ranked_lists.append(entity_ids)
+                rrf_weights.append(sc.entity_weight)
+
+        if ranked_lists:
+            rrf_scores = _rrf(ranked_lists, k=rrf_k, weights=rrf_weights)
+        else:
+            rrf_scores = {}
+
+        t3 = time.perf_counter()
+        print(f"{tag}vec={len(vec_results)} fts={len(fts_results)} rrf={int((t3-t0)*1000)}ms")
 
         ranked_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)
         return all_by_id, ranked_ids
@@ -332,12 +383,14 @@ class SearchEngine:
         session_id: str | None = None,
         _skip_expansion: bool = False,
         _force_expansion: bool = False,
+        search_config: SearchConfig | None = None,
     ) -> list[dict]:
+        sc = search_config or SearchConfig()
         cfg = self._cfg
-        candidate_count = cfg.get("search.candidate_count", 30)
-        rrf_k = cfg.get("search.rrf_k", 60)
+        candidate_count = sc.candidate_count if sc.candidate_count is not None else cfg.get("search.candidate_count", 30)
+        rrf_k = sc.rrf_k if sc.rrf_k is not None else cfg.get("search.rrf_k", 60)
         where = _build_where(topic, subtopic, collection)
-        use_expansion = _force_expansion or (cfg.get("search.query_expansion", False) and not _skip_expansion)
+        use_expansion = _force_expansion or (sc.use_expansion if search_config is not None else (cfg.get("search.query_expansion", False) and not _skip_expansion))
 
         t0 = time.perf_counter()
 
@@ -352,7 +405,7 @@ class SearchEngine:
         all_ranked_lists: list[list[str]] = []
 
         for q in queries:
-            by_id, ranked = self._retrieve_once(q, candidate_count, rrf_k, where)
+            by_id, ranked = self._retrieve_once(q, candidate_count, rrf_k, where, sc=sc)
             for rid, chunk in by_id.items():
                 if rid not in all_by_id:
                     all_by_id[rid] = chunk
@@ -373,20 +426,26 @@ class SearchEngine:
             candidates = [all_by_id[rid] for rid in all_ranked_lists[0] if rid in all_by_id][:n_results * 4]
 
         # 4. Rerank against ORIGINAL query
-        scored = _rerank_with_scores(query, candidates, n_results)
-        results = []
-        for c, score in scored:
-            r = dict(c)
-            r["_score"] = round(score, 4)
-            results.append(r)
+        if sc.use_reranker:
+            scored = _rerank_with_scores(query, candidates, n_results)
+            results = []
+            for c, score in scored:
+                r = dict(c)
+                r["_score"] = round(score, 4)
+                results.append(r)
+        else:
+            results = [dict(c) for c in candidates[:n_results]]
+            for i, r in enumerate(results):
+                r["_score"] = 1.0 / (i + 1)
         t2 = time.perf_counter()
         print(f"  [search] rerank:       {(t2-t1)*1000:.0f}ms  ({len(results)} results)")
 
         # 5. Rating + importance boost
-        results = _apply_rating_boost(results)
+        if sc.use_rating_boost:
+            results = _apply_rating_boost(results)
 
         # 6. Session-aware deprioritization (with TTL)
-        if session_id:
+        if sc.use_session_dedup and session_id:
             try:
                 from .database import get_database
                 ttl = cfg.get("search.session_ttl_minutes", 30)

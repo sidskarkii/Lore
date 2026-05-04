@@ -43,6 +43,8 @@ config.local.yaml
 
 # Eval outputs
 eval_results/
+eval/
+eval_queries*.jsonl
 
 # Reference repos
 misc/

@@ -48,6 +48,29 @@ Agent (Claude Code, Cursor, etc.)
 +-----------+     +-----------+     +-----------+
 ```
 
+## Retrieval benchmark
+
+Tested on 93 agent-style queries (keyword, entity, fact, comparison, conceptual) across a 5,080-chunk corpus with full 4-stage enrichment.
+
+| Config | MRR@5 | Recall@10 | Hit Rate |
+|--------|------:|----------:|---------:|
+| Vector only | 0.256 | 0.430 | 36.6% |
+| BM25 only | 0.427 | 0.527 | 50.5% |
+| Hybrid RRF (no reranker) | 0.332 | 0.462 | 40.9% |
+| **Full pipeline** | **0.431** | **0.538** | **51.6%** |
+
+Full pipeline improves MRR@5 by **68%** over vector-only. By query type:
+
+| Query type | Vector | BM25 | Full pipeline |
+|------------|-------:|-----:|--------------:|
+| Keyword | 0.167 | **0.487** | 0.435 |
+| Entity | 0.223 | 0.460 | **0.542** |
+| Fact | 0.223 | **0.475** | 0.350 |
+| Comparison | 0.375 | 0.321 | **0.429** |
+| Conceptual | 0.333 | 0.355 | **0.395** |
+
+No single signal wins everywhere. Vector fails on keyword lookups. BM25 fails on cross-source comparisons. The full pipeline is the only configuration with no blind spot, leading on entity, comparison, and conceptual queries.
+
 ## How it works
 
 **Search.**

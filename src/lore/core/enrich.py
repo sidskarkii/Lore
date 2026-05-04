@@ -9,6 +9,9 @@ import re
 import threading
 import time
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
 
 log = logging.getLogger(__name__)
 
@@ -98,6 +101,7 @@ def _save_enrichment_cache():
 def _extract_json(response: str) -> list[dict]:
     if not response:
         raise ValueError("Empty response")
+    print(f"  [json] Parsing response ({len(response)} chars), first 200: {response[:200]!r}", flush=True)
 
     text = response.strip()
 
@@ -146,6 +150,7 @@ def _extract_json(response: str) -> list[dict]:
         results = results["results"]
     if not isinstance(results, list):
         results = [results]
+    print(f"  [json] Parsed {len(results)} results. Keys in first: {list(results[0].keys()) if results else 'EMPTY'}", flush=True)
     return results
 
 
@@ -432,26 +437,66 @@ _CACHE_FIELDS = ("title", "summary", "keywords", "concept_tags", "importance", "
                  "semantic_key", "self_contained", "confidence", "why_important")
 
 
-def _apply_enrichment(chunk: dict, enrichment: dict):
-    """Apply enrichment data to a chunk. All-or-nothing — doesn't partial write. Also caches."""
+class ChunkEnrichment(BaseModel):
+    title: str = Field(min_length=3)
+    summary: str = Field(min_length=20)
+    tags: list[str] = Field(default_factory=list)
+    concept_tags: list[str] = Field(default_factory=list)
+    related_tags: list[str] = Field(default_factory=list)
+    importance: int = Field(ge=1, le=5, default=3)
+    why_important: str = ""
+    questions: list[str] = Field(default_factory=list)
+    self_contained: bool = True
+    confidence: Literal["fact", "empirical", "opinion", "anecdote", "hypothesis"] = "fact"
+    semantic_key: str = ""
+
+    @field_validator("tags", "concept_tags", "related_tags", mode="before")
+    @classmethod
+    def strip_empty_strings(cls, v):
+        if isinstance(v, list):
+            return [s for s in v if isinstance(s, str) and s.strip()]
+        return v
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def coerce_confidence(cls, v):
+        if isinstance(v, str):
+            v = v.strip().lower()
+            valid = {"fact", "empirical", "opinion", "anecdote", "hypothesis"}
+            if v in valid:
+                return v
+        return "fact"
+
+
+def _apply_enrichment(chunk: dict, enrichment: dict, chunk_idx: int = -1) -> ChunkEnrichment | None:
+    """Validate with Pydantic, apply to chunk, cache. Returns validated model or None on failure."""
+    try:
+        validated = ChunkEnrichment(**enrichment)
+    except Exception as e:
+        print(f"  [enrich] INVALID chunk {chunk_idx}: {e}", flush=True)
+        print(f"  [enrich]   raw title={enrichment.get('title')!r}, raw summary={str(enrichment.get('summary', ''))[:80]!r}", flush=True)
+        return None
+
     update = {
-        "title": enrichment.get("title", ""),
-        "summary": enrichment.get("summary", ""),
-        "keywords": ", ".join(enrichment.get("tags", [])),
-        "concept_tags": ", ".join(enrichment.get("concept_tags", [])),
-        "importance": int(enrichment.get("importance", 3)),
-        "semantic_key": enrichment.get("semantic_key", ""),
-        "questions": ", ".join(enrichment.get("questions", [])),
-        "self_contained": enrichment.get("self_contained", True),
-        "confidence": enrichment.get("confidence", ""),
-        "why_important": enrichment.get("why_important", ""),
+        "title": validated.title,
+        "summary": validated.summary,
+        "keywords": ", ".join(validated.tags),
+        "concept_tags": ", ".join(validated.concept_tags),
+        "importance": validated.importance,
+        "semantic_key": validated.semantic_key,
+        "questions": ", ".join(validated.questions),
+        "self_contained": validated.self_contained,
+        "confidence": validated.confidence,
+        "why_important": validated.why_important,
     }
     chunk.update(update)
+    print(f"  [enrich] chunk {chunk_idx} OK: title={update['title'][:50]!r}, importance={update['importance']}", flush=True)
 
     cache = _get_enrichment_cache()
     h = _content_hash(chunk.get("text", ""))
     if h:
         cache[h] = {k: v for k, v in update.items()}
+    return validated
 
 
 # ── Rolling key dictionary ──────────────────────────────────────────
@@ -593,16 +638,22 @@ def enrich_chunks_stage2(
                 print(f"  [stage2] Batch {batch_num}: LLM returned {len(results)} for {len(batch)} chunks — truncating", flush=True)
                 results = results[:len(batch)]
 
+            applied = 0
+            last_validated: ChunkEnrichment | None = None
             for (orig_idx, chunk), enrichment in zip(batch, results):
-                _apply_enrichment(chunk, enrichment)
-                tags = enrichment.get("concept_tags", [])
-                rolling_keys.update_from_chunk(tags, orig_idx)
+                validated = _apply_enrichment(chunk, enrichment, chunk_idx=orig_idx)
+                if validated:
+                    applied += 1
+                    last_validated = validated
+                    rolling_keys.update_from_chunk(validated.concept_tags, orig_idx)
+                else:
+                    failed.append(([(orig_idx, chunk)], section))
 
-            last_enriched = results[-1]
-            prev_title = last_enriched.get("title", "")
-            prev_summary = last_enriched.get("summary", "")
-            prev_tags = ", ".join(last_enriched.get("concept_tags", []))
-            print(f"  [stage2] Batch {batch_num}/{total_batches} OK: {len(results)} enriched, title='{prev_title[:40]}'", flush=True)
+            if last_validated:
+                prev_title = last_validated.title
+                prev_summary = last_validated.summary
+                prev_tags = ", ".join(last_validated.concept_tags)
+            print(f"  [stage2] Batch {batch_num}/{total_batches}: {applied}/{len(results)} valid", flush=True)
         except Exception as e:
             print(f"  [stage2] Batch {batch_num} FAILED: {type(e).__name__}: {e}", flush=True)
             failed.append((batch, section))
@@ -630,10 +681,13 @@ def enrich_chunks_stage2(
                 if len(results) < len(batch):
                     print(f"  [stage2] Fallback: expected {len(batch)} results, got {len(results)} — skipping", flush=True)
                 else:
+                    fb_applied = 0
                     for (orig_idx, chunk), enrichment in zip(batch, results):
-                        _apply_enrichment(chunk, enrichment)
-                        rolling_keys.update_from_chunk(enrichment.get("concept_tags", []), orig_idx)
-                    print(f"  [stage2] Fallback OK: {len(results)} enriched", flush=True)
+                        validated = _apply_enrichment(chunk, enrichment, chunk_idx=orig_idx)
+                        if validated:
+                            fb_applied += 1
+                            rolling_keys.update_from_chunk(validated.concept_tags, orig_idx)
+                    print(f"  [stage2] Fallback: {fb_applied}/{len(results)} valid", flush=True)
             except Exception as e:
                 print(f"  [stage2] Retry permanently failed: {e}", flush=True)
 
@@ -863,3 +917,72 @@ def enrich_book_stage4(
         print(f"  [stage4] Book summary failed: {type(e).__name__}: {e}")
         return {"overview": "", "main_themes": [], "key_takeaways": [], "tags": [],
                 "cross_section_patterns": [], "_error": str(e)}
+
+
+# ── Re-enrich existing archive collections ────────────────────────
+
+def re_enrich_collection(collection_id: str) -> dict:
+    """Re-run stage 2 enrichment on an existing archive collection. Returns stats."""
+    from pathlib import Path
+    from ..providers.registry import get_registry
+
+    archive_root = (Path.home() / ".lore" / "archive").resolve()
+    safe_name = Path(collection_id).name
+    archive_dir = (archive_root / safe_name).resolve()
+    if not str(archive_dir).startswith(str(archive_root)):
+        return {"error": f"Invalid collection ID: {collection_id}"}
+    chunks_path = archive_dir / "chunks.json"
+    meta_path = archive_dir / "meta.json"
+
+    if not chunks_path.exists():
+        return {"error": f"Collection not found: {collection_id}"}
+
+    chunks = json.loads(chunks_path.read_text())
+    meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+    book_title = meta.get("episode_title", collection_id)
+
+    before_titles = sum(1 for c in chunks if c.get("title"))
+    print(f"  [re-enrich] {collection_id}: {len(chunks)} chunks, {before_titles} already have titles", flush=True)
+
+    provider = get_registry().active
+    if not provider:
+        return {"error": "No LLM provider configured"}
+    print(f"  [re-enrich] Provider: {provider.name}", flush=True)
+
+    # Clear cache entries for chunks missing titles so they get re-processed
+    cache = _get_enrichment_cache()
+    cleared = 0
+    for c in chunks:
+        if not c.get("title"):
+            h = _content_hash(c.get("text", ""))
+            if h in cache:
+                del cache[h]
+                cleared += 1
+    print(f"  [re-enrich] Cleared {cleared} stale cache entries", flush=True)
+
+    chunks = enrich_chunks_stage2(chunks, provider, book_title=book_title)
+
+    after_titles = sum(1 for c in chunks if c.get("title"))
+    print(f"  [re-enrich] Done: {after_titles}/{len(chunks)} now have titles (was {before_titles})", flush=True)
+
+    # Save back to archive
+    chunks_path.write_text(json.dumps(chunks, indent=2, default=str))
+    _save_enrichment_cache()
+    print(f"  [re-enrich] Saved {safe_name}/chunks.json", flush=True)
+
+    # Sync enriched metadata back to LanceDB store
+    try:
+        from .store import get_store
+        store = get_store()
+        synced = store.update_chunk_metadata(safe_name, chunks)
+        print(f"  [re-enrich] Synced {synced} chunks to LanceDB", flush=True)
+    except Exception as e:
+        print(f"  [re-enrich] WARNING: LanceDB sync failed: {e}. Search results may be stale.", flush=True)
+
+    return {
+        "collection": collection_id,
+        "total_chunks": len(chunks),
+        "titles_before": before_titles,
+        "titles_after": after_titles,
+        "newly_enriched": after_titles - before_titles,
+    }
